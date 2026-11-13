@@ -11,24 +11,36 @@ const BACKUP_DIR = path.join(WORKSPACE, '.agent_backups');
 const IGNORE_DIRS = ['node_modules', '.git', '.next', '.agent_backups', '.agent_chats', 'dist', 'build', 'coverage'];
 
 export const toolSchemas = [
-  { type: 'function', function: { name: 'scan_project', description: 'Get full project structure + package.json + tsconfig summary. ALWAYS call this FIRST before any change to understand the codebase.', parameters: { type: 'object', properties: { max_depth: { type: 'number', description: 'Max folder depth (default 3)' } } } } },
-  { type: 'function', function: { name: 'grep_search', description: 'Search for a text pattern across project files.', parameters: { type: 'object', properties: { pattern: { type: 'string' }, file_glob: { type: 'string' } }, required: ['pattern'] } } },
-  { type: 'function', function: { name: 'update_plan', description: 'Create a checklist of steps for complex tasks.', parameters: { type: 'object', properties: { plan: { type: 'array', items: { type: 'string' } } }, required: ['plan'] } } },
+  { 
+    type: 'function', 
+    function: { 
+      name: 'open_url', 
+      description: 'Open a website. Accepts either a full URL (https://x.com) OR a project name (e.g. "GentMart"). If a project name, finds it in ~/Documents/, detects its port, starts the dev server if not running, then opens it. No questions asked.', 
+      parameters: { 
+        type: 'object', 
+        properties: { 
+          target: { type: 'string', description: 'URL or project name' } 
+        }, 
+        required: ['target'] 
+      } 
+    } 
+  },
+  { type: 'function', function: { name: 'scan_project', description: 'Get project structure.', parameters: { type: 'object', properties: { max_depth: { type: 'number' } } } } },
+  { type: 'function', function: { name: 'grep_search', description: 'Search for a text pattern.', parameters: { type: 'object', properties: { pattern: { type: 'string' }, file_glob: { type: 'string' } }, required: ['pattern'] } } },
+  { type: 'function', function: { name: 'update_plan', description: 'Create a checklist of steps.', parameters: { type: 'object', properties: { plan: { type: 'array', items: { type: 'string' } } }, required: ['plan'] } } },
   { type: 'function', function: { name: 'read_file', description: 'Read a file.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
-  { type: 'function', function: { name: 'write_file', description: 'Create a NEW file only. BLOCKED if file already exists — use edit_file instead.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
+  { type: 'function', function: { name: 'write_file', description: 'Create a NEW file only.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
   { type: 'function', function: { name: 'edit_file', description: 'Surgical string replace in existing file.', parameters: { type: 'object', properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['path', 'old_string', 'new_string'] } } },
-  { type: 'function', function: { name: 'bash', description: 'Run a READ-ONLY bash command (or background process).', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } } },
-  { type: 'function', function: { name: 'check_build', description: 'Run npm run build to verify.', parameters: { type: 'object', properties: {} } } },
+  { type: 'function', function: { name: 'bash', description: 'Run a READ-ONLY bash command or background process.', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } } },
+  { type: 'function', function: { name: 'check_build', description: 'Run npm run build.', parameters: { type: 'object', properties: {} } } },
 ];
 
 const HARD_BLOCK = ['rm -rf /', ':(){', '> /dev/sd', 'mkfs', 'dd if=/dev/zero', 'shutdown', 'reboot'];
 const READONLY_GIT = ['status', 'diff', 'log', 'show', 'branch', 'remote', 'config', 'rev-parse', 'ls-files', 'blame'];
-const SAFE_PREFIXES = ['ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'wc', 'pwd', 'which', 'file', 'stat', 'du', 'df', 'tree', 'echo', 'node', 'npm', 'npx', 'cargo', 'rustc', 'git', 'nohup', 'xdg-open'];
+const SAFE_PREFIXES = ['ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'wc', 'pwd', 'which', 'file', 'stat', 'du', 'df', 'tree', 'echo', 'node', 'npm', 'npx', 'cargo', 'rustc', 'git', 'nohup', 'xdg-open', 'curl'];
 
 function isShellWrite(cmd: string): { isWrite: boolean; reason?: string } {
-  // Allow background redirection to /tmp
   if (cmd.includes('> /tmp/') || cmd.includes('>> /tmp/')) return { isWrite: false };
-  
   const commands = cmd.split(/&&|\|\||;/);
   for (const c of commands) {
     const trimmed = c.trim();
@@ -36,27 +48,25 @@ function isShellWrite(cmd: string): { isWrite: boolean; reason?: string } {
     const redirectMatch = trimmed.match(/(?<![0-9&])>(?!>)\s*([^\s]+)/);
     if (redirectMatch) {
       const target = redirectMatch[1];
-      if (!target.startsWith('/dev/null') && !target.startsWith('/dev/zero') && !target.startsWith('/tmp/') && !target.startsWith('&')) {
-        return { isWrite: true, reason: `output redirection (> ${target})` };
-      }
+      if (!target.startsWith('/dev/null') && !target.startsWith('/dev/zero') && !target.startsWith('/tmp/') && !target.startsWith('&')) return { isWrite: true, reason: `output redirection (> ${target})` };
     }
-    if (/>>\s*[^\s&]/.test(trimmed) && !trimmed.includes('/dev/null') && !trimmed.includes('/tmp/')) return { isWrite: true, reason: 'append redirection (>>)' };
+    if (/>>\s*[^\s&]/.test(trimmed) && !trimmed.includes('/dev/null') && !trimmed.includes('/tmp/')) return { isWrite: true, reason: 'append redirection' };
     if (/\b(sed|perl|ruby|awk)\s+(-\S*i|--in-place)/.test(trimmed)) return { isWrite: true, reason: 'in-place editor' };
     if (/(^|\s)(tee|truncate)\s/.test(trimmed)) return { isWrite: true, reason: 'tee/truncate' };
-    if (/^\s*(rm|mv|cp|ln|chmod|chown|chgrp|shred|dd|unlink)\s/.test(trimmed)) return { isWrite: true, reason: 'destructive file command' };
+    if (/^\s*(rm|mv|cp|ln|chmod|chown|chgrp|shred|dd|unlink)\s/.test(trimmed)) return { isWrite: true, reason: 'destructive command' };
     if (/^\s*(touch|mkdir|rmdir)\s/.test(trimmed)) return { isWrite: true, reason: 'file creation' };
   }
   return { isWrite: false };
 }
 
 export function needsApproval(name: string, args: any): { need: boolean; reason?: string; blocked?: boolean } {
-  if (name === 'read_file' || name === 'update_plan' || name === 'check_build' || name === 'scan_project' || name === 'grep_search') return { need: false };
+  if (name === 'read_file' || name === 'update_plan' || name === 'check_build' || name === 'scan_project' || name === 'grep_search' || name === 'open_url') return { need: false };
   if (name === 'write_file' || name === 'edit_file') return { need: true, reason: 'File modification' };
   if (name === 'bash') {
     const cmd = String(args.command || '');
-    if (HARD_BLOCK.some((d) => cmd.includes(d))) return { need: false, blocked: true, reason: 'catastrophic command' };
+    if (HARD_BLOCK.some((d) => cmd.includes(d))) return { need: false, blocked: true, reason: 'catastrophic' };
     const writeCheck = isShellWrite(cmd);
-    if (writeCheck.isWrite) return { need: false, blocked: true, reason: `⛔ ${writeCheck.reason} FORBIDDEN. Use edit_file.` };
+    if (writeCheck.isWrite) return { need: false, blocked: true, reason: `⛔ ${writeCheck.reason} FORBIDDEN.` };
     const parts = cmd.trim().split(/\s+/);
     if (parts[0] === 'git') {
       const sub = parts[1] || '';
@@ -69,24 +79,12 @@ export function needsApproval(name: string, args: any): { need: boolean; reason?
   return { need: true, reason: 'Unknown tool' };
 }
 
-// ═══════════════════════════════════════════
-// NAYA: Path restriction हटाइयो (Documents भित्र जहाँ पनि काम गर्न दिने)
-// ═══════════════════════════════════════════
 function resolveSafe(p: string): string {
   const full = path.resolve(p);
   const isInsideAgent = full.startsWith(WORKSPACE);
   const isInsideDocs = full.startsWith(USER_DOCS);
-
-  if (!isInsideAgent && !isInsideDocs) {
-    throw new Error('Path outside allowed workspace (Documents folder)');
-  }
-
-  // Only protect config files inside coding-agent itself
-  if (isInsideAgent) {
-    if (p.includes('AGENT_RULES.md') || p.includes('.env') || p.includes('.git/')) {
-      throw new Error('Protected file (agent core)');
-    }
-  }
+  if (!isInsideAgent && !isInsideDocs) throw new Error('Path outside allowed');
+  if (isInsideAgent && (p.includes('AGENT_RULES.md') || p.includes('.env') || p.includes('.git/'))) throw new Error('Protected file');
   return full;
 }
 
@@ -142,7 +140,6 @@ async function verifyAndSave(fullPath: string, newContent: string) {
   try { oldContent = await fs.readFile(fullPath, 'utf-8'); exists = true; } catch {}
 
   if (!newContent || newContent.trim().length < 10) throw new Error(`SAFETY: ${fileName} too short`);
-
   if (exists && oldContent.length > 500) {
     const shrinkRatio = newContent.length / oldContent.length;
     if (shrinkRatio < 0.4) throw new Error(`SAFETY: ${fileName} shrank to ${Math.round(shrinkRatio * 100)}%`);
@@ -151,10 +148,13 @@ async function verifyAndSave(fullPath: string, newContent: string) {
   const tmpPath = fullPath + '.agent_tmp';
   await fs.writeFile(tmpPath, newContent, 'utf-8');
   try {
+    if (fullPath.endsWith('.ts') || fullPath.endsWith('.tsx')) {
+      await execAsync('npx tsc --noEmit', { cwd: WORKSPACE, timeout: 90000 });
+    }
     await fs.rename(tmpPath, fullPath);
   } catch (e: any) {
     await fs.unlink(tmpPath).catch(() => {});
-    throw new Error(`SAFETY: Write failed.\n\n${e.message}`);
+    throw new Error(`SAFETY: TypeScript failed.\n\n${((e.stdout || '') + (e.stderr || '')).trim()}`);
   }
 }
 
@@ -202,9 +202,7 @@ async function walkTree(dir: string, base: string, depth: number, maxDepth: numb
       if (e.isDirectory()) {
         out += `${indent}${e.name}/\n`;
         out += await walkTree(path.join(dir, e.name), base, depth + 1, maxDepth);
-      } else {
-        out += `${indent}${e.name}\n`;
-      }
+      } else out += `${indent}${e.name}\n`;
     }
   } catch {}
   return out;
@@ -216,18 +214,134 @@ async function scanProject(maxDepth: number): Promise<string> {
   return result.slice(0, 12000);
 }
 
+// ═══════════════════════════════════════════════════════════════
+// SMART OPEN: URL → direct, Project Name → detect + start + open
+// ═══════════════════════════════════════════════════════════════
+async function smartOpen(target: string, onOutput?: (s: string) => void): Promise<string> {
+  const t = target.trim();
+
+  // CASE 1: Full URL → open directly
+  if (t.startsWith('http://') || t.startsWith('https://')) {
+    onOutput?.(`🌐 Opening ${t}...\n`);
+    spawn('xdg-open', [t], { detached: true, stdio: 'ignore' }).unref();
+    return `✅ Opened ${t} in browser.`;
+  }
+
+  // CASE 2: localhost:port → add http:// and open
+  if (/^localhost:\d+/.test(t) || /^127\.0\.0\.1:\d+/.test(t)) {
+    const url = `http://${t}`;
+    onOutput?.(`🌐 Opening ${url}...\n`);
+    spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+    return `✅ Opened ${url}.`;
+  }
+
+  // CASE 3: Project name → find in ~/Documents
+  const projectName = t.toLowerCase().replace(/\s+/g, '');
+  
+  // Try exact matches first, then case-insensitive
+  let projectPath = '';
+  try {
+    const docs = await fs.readdir(USER_DOCS, { withFileTypes: true });
+    const dirs = docs.filter((d) => d.isDirectory());
+    
+    // Exact or case-insensitive match
+    const exact = dirs.find((d) => d.name === target || d.name.toLowerCase() === target.toLowerCase());
+    if (exact) {
+      projectPath = path.join(USER_DOCS, exact.name);
+    } else {
+      // Fuzzy: contains
+      const fuzzy = dirs.find((d) => d.name.toLowerCase().includes(projectName));
+      if (fuzzy) projectPath = path.join(USER_DOCS, fuzzy.name);
+    }
+  } catch {}
+
+  if (!projectPath) {
+    throw new Error(`Project "${target}" not found in ~/Documents/. Available: ${(await fs.readdir(USER_DOCS)).filter(d => !d.startsWith('.')).join(', ')}`);
+  }
+
+  onOutput?.(`📂 Found project: ${projectPath}\n`);
+
+  // Read package.json to find port
+  let port = 3000;
+  try {
+    const pkgRaw = await fs.readFile(path.join(projectPath, 'package.json'), 'utf-8');
+    const pkg = JSON.parse(pkgRaw);
+    const devScript = String(pkg.scripts?.dev || '');
+    // Try to extract port: -p 4100 or --port 4100 or PORT=4100
+    const portMatch = devScript.match(/(?:-p|--port)\s+(\d+)/) || devScript.match(/PORT=(\d+)/);
+    if (portMatch) port = parseInt(portMatch[1], 10);
+    else if (pkg.name?.toLowerCase().includes('genmart')) port = 4100;
+  } catch {}
+
+  onOutput?.(`🔍 Detected port: ${port}\n`);
+
+  // Check if server is already running
+  let isRunning = false;
+  try {
+    const check = await execAsync(`curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://localhost:${port}`, { timeout: 5000 });
+    if (check.stdout.trim() === '200' || check.stdout.trim() === '304' || check.stdout.trim() === '301') {
+      isRunning = true;
+    }
+  } catch {}
+
+  if (isRunning) {
+    onOutput?.(`✅ Server already running on port ${port}\n`);
+  } else {
+    // Check if node_modules exist
+    const hasNodeModules = await fileExists(path.join(projectPath, 'node_modules'));
+    if (!hasNodeModules) {
+      onOutput?.(`📦 Installing dependencies...\n`);
+      try {
+        await execAsync('npm install', { cwd: projectPath, timeout: 180000 });
+      } catch (e: any) {
+        throw new Error(`npm install failed: ${e.message}`);
+      }
+    }
+
+    // Start dev server in background
+    onOutput?.(`🚀 Starting dev server on port ${port}...\n`);
+    const logFile = `/tmp/${path.basename(projectPath)}.log`;
+    spawn('bash', ['-c', `cd "${projectPath}" && nohup npm run dev > ${logFile} 2>&1 &`], { detached: true, stdio: 'ignore' }).unref();
+
+    // Wait up to 30s for server
+    let ready = false;
+    for (let i = 0; i < 15; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const check = await execAsync(`curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://localhost:${port}`, { timeout: 5000 });
+        const code = check.stdout.trim();
+        if (code === '200' || code === '304' || code === '301') { ready = true; break; }
+      } catch {}
+    }
+
+    if (!ready) {
+      throw new Error(`Server did not start in 30s. Check ${logFile} for errors.`);
+    }
+    onOutput?.(`✅ Server ready on port ${port}\n`);
+  }
+
+  // Open in browser
+  const url = `http://localhost:${port}`;
+  onOutput?.(`🌐 Opening ${url}...\n`);
+  spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+  return `✅ Opened ${path.basename(projectPath)} at ${url}`;
+}
+
 export type ToolResult = { name: string; args: any; result: string };
 
 export async function executeTool(name: string, args: any, onOutput?: (chunk: string) => void): Promise<ToolResult> {
   let result = '';
   try {
-    if (name === 'scan_project') {
+    if (name === 'open_url') {
+      const target = String(args.target || args.url || '');
+      if (!target) throw new Error('target (URL or project name) is required');
+      result = await smartOpen(target, onOutput);
+    } else if (name === 'scan_project') {
       result = await scanProject(args.max_depth || 3);
     } else if (name === 'grep_search') {
       const pattern = String(args.pattern || '');
       onOutput?.(`🔍 Searching: ${args.pattern}\n`);
-      const out = await runBashStreaming(`grep -rn --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=.git -E "${pattern}" . 2>/dev/null | head -50`);
-      result = out;
+      result = await runBashStreaming(`grep -rn --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=.git -E "${pattern}" . 2>/dev/null | head -50`);
     } else if (name === 'update_plan') {
       result = 'Plan updated.';
     } else if (name === 'read_file') {
@@ -237,20 +351,20 @@ export async function executeTool(name: string, args: any, onOutput?: (chunk: st
       result = content.length > 20000 ? content.slice(0, 20000) + '\n...(truncated)' : content;
     } else if (name === 'write_file') {
       const full = resolveSafe(String(args.path || ''));
-      if (await fileExists(full)) throw new Error(`⛔ REWRITE BLOCKED: ${args.path} already exists. Use edit_file.`);
+      if (await fileExists(full)) throw new Error(`⛔ REWRITE BLOCKED: ${args.path} exists. Use edit_file.`);
       onOutput?.(`📝 Creating NEW file ${args.path}...\n`);
       await fs.mkdir(path.dirname(full), { recursive: true });
       await verifyAndSave(full, String(args.content ?? ''));
-      result = `✅ Created NEW file ${args.path}.`;
+      result = `✅ Created ${args.path}.`;
     } else if (name === 'edit_file') {
       const full = resolveSafe(String(args.path || ''));
-      if (!(await fileExists(full))) throw new Error(`File ${args.path} does not exist. Use write_file.`);
+      if (!(await fileExists(full))) throw new Error(`File ${args.path} does not exist.`);
       onOutput?.(`✏️ Editing ${args.path}...\n`);
       await backupFile(full);
       const original = await fs.readFile(full, 'utf-8');
       const oldStr = String(args.old_string ?? '');
       const newStr = String(args.new_string ?? '');
-      if (!oldStr) result = 'Error: old_string is empty';
+      if (!oldStr) result = 'Error: old_string empty';
       else {
         const count = original.split(oldStr).length - 1;
         if (count === 0) result = 'Error: old_string not found.';

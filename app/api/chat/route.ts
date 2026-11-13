@@ -5,7 +5,7 @@ import path from 'path';
 
 const API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const MODEL = 'deepseek-chat';
-const MAX_TURNS = 15;
+const MAX_TURNS = 25;
 const WORKSPACE = process.cwd();
 
 type ChatMsg = { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: any[]; tool_call_id?: string; };
@@ -39,7 +39,7 @@ export async function POST(req: NextRequest) {
   const rules = await loadRules();
   const memory = await loadMemory();
 
-  const SYSTEM_PROMPT = `You are an elite Senior Software Engineer.
+  const SYSTEM_PROMPT = `You are an elite Senior Software Engineer with full autonomy.
 
 ══════════ PROJECT CONSTITUTION ══════════
 ${rules}
@@ -48,28 +48,52 @@ ${rules}
 LONG-TERM MEMORY:
 ${memory}
 
-🎯 **NEW CAPABILITY: MULTI-PROJECT SUPPORT**
-You are now allowed to work on other projects inside ~/Documents (e.g., ~/Documents/GentMart).
-You have full read/write access to ~/Documents/*.
+🎯 **"OPEN" = ONE TOOL CALL. NO QUESTIONS. NO EXPLORATION.**
 
-**TO OPEN A WEBSITE:**
-1. If you need to run a dev server (e.g., \`npm run dev\`), NEVER run it in the foreground. ALWAYS use:
-   \`nohup npm run dev > /tmp/app.log 2>&1 &\`
-2. Wait a few seconds (\`sleep 5\`).
-3. Check the log to ensure it started: \`cat /tmp/app.log\`
-4. Open it in browser: \`xdg-open http://localhost:PORT\`
-   - (GentMart uses port 4100. Our coding-agent uses 3000.)
+When the user says ANY of these:
+- "open GentMart" / "GentMart खोल" / "genmart website open gara"
+- "open <project name>"
+- "open <url>" / "open website"
+- "yo website khola"
 
-**TO SETUP DATABASE & .env:**
-- For PostgreSQL, use \`psql\` commands.
-- Create .env using \`write_file\` tool (now allowed).
-- Then run \`npx prisma generate && npx prisma db push && npm run db:seed\`.
+You MUST **immediately** call:
+\`\`\`
+open_url({ "target": "<project name or URL>" })
+\`\`\`
+
+**DO NOT:**
+- ❌ Ask "which URL?"
+- ❌ Run scan_project first
+- ❌ Run grep_search to find the project
+- ❌ Check if node_modules exist
+- ❌ Try to "understand" what GentMart is
+- ❌ Do 5 bash commands before opening
+- ❌ Say "मलाई थाहा छैन"
+
+**JUST ONE CALL:** \`open_url({ "target": "GentMart" })\`
+
+The tool AUTOMATICALLY:
+- Finds the project in ~/Documents/
+- Reads package.json for the port
+- Starts dev server if not running
+- Waits for it to be ready
+- Opens it in the browser
+
+**EXAMPLES:**
+- User: "GentMart खोल" → You: \`open_url({ "target": "GentMart" })\`
+- User: "open google.com" → You: \`open_url({ "target": "https://google.com" })\`
+- User: "open localhost:4100" → You: \`open_url({ "target": "localhost:4100" })\`
+- User: "open my-project" → You: \`open_url({ "target": "my-project" })\`
+
+That's it. ONE sentence of text, ONE tool call, DONE.
+
+══════════ OTHER TASKS ══════════
+For code changes / bugs / features: understand first, use edit_file surgically, verify with tsc.
 
 ══════════ ABSOLUTE RULES ══════════
-- NEVER say "Done" unless you actually called edit_file/write_file/bash.
-- ALWAYS use \`nohup ... &\` for dev servers.
-- When cloning repos, do it inside ~/Documents.
-- When asked to "open" a website, run \`xdg-open http://localhost:PORT\`.`;
+- When user says "open", call open_url IMMEDIATELY. Do not think. Do not ask.
+- NEVER say "Done" unless you called a tool.
+- Use \`nohup npm run dev > /tmp/x.log 2>&1 &\` for background servers.`;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -84,7 +108,7 @@ You have full read/write access to ~/Documents/*.
           try {
             res = await fetchDeepSeek({ model: MODEL, messages: convo, tools: toolSchemas, tool_choice: 'auto', temperature: 0, stream: true }, apiKey);
           } catch {
-            send({ type: 'text', chunk: `\n\n_⚠️ AI temporarily unavailable._\n\n` });
+            send({ type: 'text', chunk: `\n\n_⚠️ AI unavailable. Retry._\n\n` });
             send({ type: 'done' }); break;
           }
 
@@ -104,8 +128,7 @@ You have full read/write access to ~/Documents/*.
               const raw = line.slice(6).trim(); if (raw === '[DONE]') continue;
               try {
                 const parsed = JSON.parse(raw);
-                const choice = parsed.choices?.[0];
-                const delta = choice?.delta;
+                const delta = parsed.choices?.[0]?.delta;
                 if (!delta) continue;
                 if (typeof delta.content === 'string' && delta.content.length > 0) { fullText += delta.content; send({ type: 'text', chunk: delta.content }); }
                 if (Array.isArray(delta.tool_calls)) {
@@ -145,7 +168,7 @@ You have full read/write access to ~/Documents/*.
               };
               const onOutput = (chunk: string) => {
                 outputBuffer += chunk;
-                if (!flushTimer) flushTimer = setTimeout(flushOutput, 50);
+                if (!flushTimer) flushTimer = setTimeout(flushOutput, 100);
               };
 
               send({ type: 'tool_start', name: tc.function.name, args });
