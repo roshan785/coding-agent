@@ -11,13 +11,10 @@ export const toolSchemas = [
     type: 'function',
     function: {
       name: 'read_file',
-      description:
-        'Read a file from the workspace. Path is relative to the project root.',
+      description: 'Read a file from the workspace (relative path).',
       parameters: {
         type: 'object',
-        properties: {
-          path: { type: 'string', description: 'Relative path, e.g. app/page.tsx' },
-        },
+        properties: { path: { type: 'string' } },
         required: ['path'],
       },
     },
@@ -25,23 +22,52 @@ export const toolSchemas = [
   {
     type: 'function',
     function: {
-      name: 'bash',
+      name: 'write_file',
       description:
-        'Run a bash command in the project root. Use for ls, grep, cat, cargo check, npm test, git status, etc.',
+        'Write full content to a file. Overwrites existing file. Use ONLY for NEW files or complete rewrites. For small edits, use edit_file.',
       parameters: {
         type: 'object',
         properties: {
-          command: { type: 'string', description: 'Bash command' },
+          path: { type: 'string' },
+          content: { type: 'string' },
         },
+        required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description:
+        'Surgically replace a unique string in a file. PREFERRED over write_file. old_string MUST appear exactly once.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+          old_string: { type: 'string' },
+          new_string: { type: 'string' },
+        },
+        required: ['path', 'old_string', 'new_string'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'bash',
+      description: 'Run a bash command in the project root.',
+      parameters: {
+        type: 'object',
+        properties: { command: { type: 'string' } },
         required: ['command'],
       },
     },
   },
 ];
 
-const BLOCKED = [
+const HARD_BLOCK = [
   'rm -rf /',
-  'sudo ',
   ':(){',
   '> /dev/',
   'mkfs',
@@ -49,6 +75,51 @@ const BLOCKED = [
   'shutdown',
   'reboot',
 ];
+
+const READONLY_BASH = [
+  'ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'wc', 'pwd',
+  'echo', 'which', 'file', 'stat', 'du', 'df', 'tree', 'node',
+  'npm', 'npx', 'cargo', 'rustc', 'python', 'python3', 'bash', 'sh',
+];
+
+const READONLY_GIT = [
+  'status', 'diff', 'log', 'show', 'branch', 'remote',
+  'config', 'rev-parse', 'ls-files',
+];
+
+export function needsApproval(
+  name: string,
+  args: any
+): { need: boolean; reason?: string; blocked?: boolean } {
+  if (name === 'read_file') return { need: false };
+
+  if (name === 'write_file' || name === 'edit_file') {
+    return { need: true, reason: 'File modification' };
+  }
+
+  if (name === 'bash') {
+    const cmd = String(args.command || '');
+    if (HARD_BLOCK.some((d) => cmd.includes(d))) {
+      return { need: false, blocked: true };
+    }
+    const parts = cmd.trim().split(/\s+/);
+    const first = parts[0] || '';
+    if (first === 'git') {
+      const sub = parts[1] || '';
+      if (READONLY_GIT.includes(sub)) return { need: false };
+      return { need: true, reason: `git ${sub}` };
+    }
+    if (READONLY_BASH.includes(first)) {
+      if (cmd.includes('>') && !cmd.includes('>/dev/null')) {
+        return { need: true, reason: 'Shell redirection' };
+      }
+      return { need: false };
+    }
+    return { need: true, reason: 'Shell command' };
+  }
+
+  return { need: true, reason: 'Unknown tool' };
+}
 
 function resolveSafe(p: string): string {
   const full = path.resolve(WORKSPACE, p);
@@ -73,19 +144,44 @@ export async function executeTool(
         content.length > 20000
           ? content.slice(0, 20000) + '\n...(truncated)'
           : content;
+    } else if (name === 'write_file') {
+      const full = resolveSafe(String(args.path || ''));
+      await fs.mkdir(path.dirname(full), { recursive: true });
+      const content = String(args.content ?? '');
+      await fs.writeFile(full, content, 'utf-8');
+      result = `Wrote ${content.length} bytes to ${args.path}`;
+    } else if (name === 'edit_file') {
+      const full = resolveSafe(String(args.path || ''));
+      const original = await fs.readFile(full, 'utf-8');
+      const oldStr = String(args.old_string ?? '');
+      const newStr = String(args.new_string ?? '');
+      if (!oldStr) {
+        result = 'Error: old_string is empty';
+      } else {
+        const count = original.split(oldStr).length - 1;
+        if (count === 0) {
+          result =
+            'Error: old_string not found. Read the file first with read_file and copy exact text.';
+        } else if (count > 1) {
+          result = `Error: old_string appears ${count} times — must be unique.`;
+        } else {
+          await fs.writeFile(full, original.replace(oldStr, newStr), 'utf-8');
+          result = `Edited ${args.path} (replaced ${oldStr.length} → ${newStr.length} chars)`;
+        }
+      }
     } else if (name === 'bash') {
       const cmd = String(args.command || '');
-      if (BLOCKED.some((b) => cmd.includes(b))) {
-        result = 'Blocked: dangerous command detected';
+      if (HARD_BLOCK.some((d) => cmd.includes(d))) {
+        result = 'Blocked: dangerous command';
       } else {
         const { stdout, stderr } = await execAsync(cmd, {
           cwd: WORKSPACE,
-          timeout: 30000,
-          maxBuffer: 1024 * 1024,
+          timeout: 60000,
+          maxBuffer: 4 * 1024 * 1024,
         });
-        const out = (stdout || '').slice(0, 8000);
-        const err = (stderr || '').slice(0, 4000);
-        result = `stdout:\n${out}\nstderr:\n${err}`;
+        result = `stdout:\n${(stdout || '').slice(0, 8000)}\nstderr:\n${(
+          stderr || ''
+        ).slice(0, 4000)}`;
       }
     } else {
       result = `Unknown tool: ${name}`;
