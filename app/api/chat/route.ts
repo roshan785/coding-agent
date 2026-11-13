@@ -1,6 +1,6 @@
 import { NextRequest } from 'next/server';
 import { randomUUID } from 'crypto';
-import { toolSchemas, executeTool, needsApproval, runVerify, getPreviewDiff, loadRules } from '@/lib/tools';
+import { toolSchemas, executeTool, needsApproval, runVerify, getPreviewDiff, loadRules, loadMemory } from '@/lib/tools';
 import { waitForApproval } from '@/lib/permissions';
 import fs from 'fs/promises';
 import path from 'path';
@@ -26,19 +26,23 @@ export async function POST(req: NextRequest) {
   if (!apiKey) return new Response(JSON.stringify({ error: 'DEEPSEEK_API_KEY not set' }), { status: 500 });
 
   const rules = await loadRules();
+  const memory = await loadMemory(); // NAYA
   const projectContext = await getProjectContext();
   
-  // SYSTEM PROMPT: अब कुनै नियम दोहोरिएको छैन। केवल Rules फाइल पढ्न भनिएको छ।
   const SYSTEM_PROMPT = `You are an autonomous coding agent. You MUST strictly follow the PROJECT CONSTITUTION below.
 
 ============== PROJECT CONSTITUTION ==============
 ${rules}
 ==================================================
 
+LONG-TERM MEMORY (Things you learned previously):
+${memory}
+
 CURRENT WORKSPACE CONTEXT:
 ${projectContext}
 
 AVAILABLE TOOLS:
+- update_memory(content): Save important context so you don't forget.
 - update_plan(plan: string[]): Use for complex tasks.
 - read_file(path)
 - write_file(path, content): Only for NEW files.
@@ -54,7 +58,11 @@ Instructions:
   const stream = new ReadableStream({
     async start(controller) {
       const send = (obj: any) => { try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); } catch {} };
-      const convo: ChatMsg[] = [{ role: 'system', content: SYSTEM_PROMPT }, ...messages];
+      
+      // NAYA: Context Trimming (Keep only last 15 messages to save tokens)
+      const recentMessages = messages.slice(-15);
+      const convo: ChatMsg[] = [{ role: 'system', content: SYSTEM_PROMPT }, ...recentMessages];
+      
       let verifyFailCount = 0;
 
       try {
@@ -121,8 +129,6 @@ Instructions:
 
             const previewDiff = await getPreviewDiff(tc.function.name, args);
             const isWrite = tc.function.name === 'write_file' || tc.function.name === 'edit_file';
-            
-            // Auto-approve logic
             const needsPrompt = check.need && !(autoApprove && isWrite);
 
             if (needsPrompt) {

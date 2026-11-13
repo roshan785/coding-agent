@@ -12,24 +12,28 @@ export const toolSchemas = [
   { 
     type: 'function', 
     function: { 
-      name: 'update_plan', 
-      description: 'Create or update a checklist of steps for the current task. Use this for complex tasks before writing code.',
+      name: 'update_memory', 
+      description: 'Save important project context, architectural decisions, or user preferences to long-term memory (.agent_memory.md).',
       parameters: { 
         type: 'object', 
         properties: { 
-          plan: { 
-            type: 'array', 
-            items: { type: 'string' },
-            description: 'List of steps, e.g. ["Read app/page.tsx", "Add login state", "Run verify"]'
-          } 
+          content: { type: 'string', description: 'Markdown content to save or append.' }
         }, 
-        required: ['plan'] 
+        required: ['content'] 
       } 
     } 
   },
-  { type: 'function', function: { name: 'read_file', description: 'Read a file from the workspace (relative path).', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
+  { 
+    type: 'function', 
+    function: { 
+      name: 'update_plan', 
+      description: 'Create or update a checklist of steps for the current task. Use this for complex tasks before writing code.',
+      parameters: { type: 'object', properties: { plan: { type: 'array', items: { type: 'string' }, description: 'List of steps' } }, required: ['plan'] } 
+    } 
+  },
+  { type: 'function', function: { name: 'read_file', description: 'Read a file from the workspace.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
   { type: 'function', function: { name: 'write_file', description: 'Write full content to a file. Overwrites existing. Use ONLY for NEW files or complete rewrites.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
-  { type: 'function', function: { name: 'edit_file', description: 'Surgically replace a unique string in a file. PREFERRED over write_file. old_string MUST appear exactly once.', parameters: { type: 'object', properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['path', 'old_string', 'new_string'] } } },
+  { type: 'function', function: { name: 'edit_file', description: 'Surgically replace a unique string in a file. PREFERRED over write_file.', parameters: { type: 'object', properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['path', 'old_string', 'new_string'] } } },
   { type: 'function', function: { name: 'bash', description: 'Run a bash command in the project root.', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } } },
 ];
 
@@ -38,7 +42,7 @@ const READONLY_BASH = ['ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'wc', 
 const READONLY_GIT = ['status', 'diff', 'log', 'show', 'branch', 'remote', 'config', 'rev-parse', 'ls-files'];
 
 export function needsApproval(name: string, args: any): { need: boolean; reason?: string; blocked?: boolean } {
-  if (name === 'read_file' || name === 'update_plan') return { need: false };
+  if (name === 'read_file' || name === 'update_plan' || name === 'update_memory') return { need: false };
   if (name === 'write_file' || name === 'edit_file') return { need: true, reason: 'File modification' };
   if (name === 'bash') {
     const cmd = String(args.command || '');
@@ -66,11 +70,13 @@ function resolveSafe(p: string): string {
 }
 
 export async function loadRules(): Promise<string> {
-  try {
-    return await fs.readFile(path.join(WORKSPACE, 'AGENT_RULES.md'), 'utf-8');
-  } catch {
-    return "No specific rules found. Follow general safety and best practices.";
-  }
+  try { return await fs.readFile(path.join(WORKSPACE, 'AGENT_RULES.md'), 'utf-8'); } 
+  catch { return "No specific rules found."; }
+}
+
+export async function loadMemory(): Promise<string> {
+  try { return await fs.readFile(path.join(WORKSPACE, '.agent_memory.md'), 'utf-8'); } 
+  catch { return "No memory yet."; }
 }
 
 export async function getPreviewDiff(name: string, args: any): Promise<string | null> {
@@ -111,8 +117,13 @@ export type ToolResult = { name: string; args: any; result: string };
 export async function executeTool(name: string, args: any): Promise<ToolResult> {
   let result = '';
   try {
-    if (name === 'update_plan') {
-      result = `Plan updated. Proceed with executing the steps.`;
+    if (name === 'update_memory') {
+      const memPath = path.join(WORKSPACE, '.agent_memory.md');
+      const content = `\n\n## Memory Update (${new Date().toLocaleDateString()})\n${args.content}`;
+      await fs.appendFile(memPath, content, 'utf-8');
+      result = 'Memory saved successfully.';
+    } else if (name === 'update_plan') {
+      result = `Plan updated.`;
     } else if (name === 'read_file') {
       const full = resolveSafe(String(args.path || ''));
       const content = await fs.readFile(full, 'utf-8');
@@ -137,7 +148,7 @@ export async function executeTool(name: string, args: any): Promise<ToolResult> 
         else if (count > 1) result = `Error: old_string appears ${count} times.`;
         else {
           await fs.writeFile(full, original.replace(oldStr, newStr), 'utf-8');
-          result = `Edited ${args.path} (replaced ${oldStr.length} → ${newStr.length} chars)`;
+          result = `Edited ${args.path}`;
         }
       }
     } else if (name === 'bash') {
