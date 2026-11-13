@@ -24,3 +24,62 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* ---- Manual light theme (toggled via ThemeToggle) ---- */
+html.light {
+  --background: #ffffff;
+  --foreground: #171717;
+}
+
+html.light body {
+  background: #ffffff;
+  color: #171717;
+}
+
+/*
+ * The app UI uses hardcoded dark zinc utilities. When the user opts into the
+ * light theme we remap those utilities to their light equivalents so the whole
+ * interface flips without editing every component.
+ */
+html.light .bg-zinc-950 {
+  background-color: #ffffff;
+}
+html.light .bg-zinc-900 {
+  background-color: #f4f4f5;
+}
+html.light .bg-zinc-800 {
+  background-color: #e4e4e7;
+}
+html.light .text-zinc-100 {
+  color: #18181b;
+}
+html.light .text-zinc-200 {
+  color: #27272a;
+}
+html.light .text-zinc-300 {
+  color: #3f3f46;
+}
+html.light .text-zinc-400 {
+  color: #52525b;
+}
+html.light .text-zinc-500 {
+  color: #71717a;
+}
+html.light .border-zinc-800 {
+  border-color: #e4e4e7;
+}
+html.light .border-zinc-700 {
+  border-color: #d4d4d8;
+}
+html.light .hover\:bg-zinc-800:hover {
+  background-color: #e4e4e7;
+}
+html.light .hover\:text-zinc-100:hover {
+  color: #18181b;
+}
+html.light .hover\:text-zinc-200:hover {
+  color: #27272a;
+}
+html.light .bg-zinc-950\/80 {
+  background-color: rgba(255, 255, 255, 0.8);
+}

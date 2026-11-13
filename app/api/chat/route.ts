@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 import { randomUUID } from 'crypto';
 import { toolSchemas, executeTool, needsApproval, runVerify, getPreviewDiff, loadRules, loadMemory } from '@/lib/tools';
 import { waitForApproval } from '@/lib/permissions';
+import { reviewCode } from '@/lib/reviewer';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -26,7 +27,7 @@ export async function POST(req: NextRequest) {
   if (!apiKey) return new Response(JSON.stringify({ error: 'DEEPSEEK_API_KEY not set' }), { status: 500 });
 
   const rules = await loadRules();
-  const memory = await loadMemory(); // NAYA
+  const memory = await loadMemory();
   const projectContext = await getProjectContext();
   
   const SYSTEM_PROMPT = `You are an autonomous coding agent. You MUST strictly follow the PROJECT CONSTITUTION below.
@@ -42,24 +43,22 @@ CURRENT WORKSPACE CONTEXT:
 ${projectContext}
 
 AVAILABLE TOOLS:
-- update_memory(content): Save important context so you don't forget.
-- update_plan(plan: string[]): Use for complex tasks.
+- update_memory(content)
+- update_plan(plan: string[])
 - read_file(path)
-- write_file(path, content): Only for NEW files.
-- edit_file(path, old_string, new_string): PREFERRED for edits.
+- write_file(path, content)
+- edit_file(path, old_string, new_string)
 - bash(command)
 
 Instructions:
 - You are in a LOOP. Continue using tools until the task is fully complete and verified.
 - Do not ask for permission in text; if you need to run a tool, just run it.
-- The system will automatically ask the user for permission if needed, and auto-verify after edits.`;
+- The system will automatically ask the user for permission, auto-verify (tsc), and auto-review (Reviewer Agent) after edits.`;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       const send = (obj: any) => { try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`)); } catch {} };
-      
-      // NAYA: Context Trimming (Keep only last 15 messages to save tokens)
       const recentMessages = messages.slice(-15);
       const convo: ChatMsg[] = [{ role: 'system', content: SYSTEM_PROMPT }, ...recentMessages];
       
@@ -151,14 +150,34 @@ Instructions:
             convo.push({ role: 'tool', tool_call_id: tc.id, content: result.result });
 
             const succeeded = !result.result.startsWith('Error') && !result.result.startsWith('Blocked');
+            
             if (isWrite && succeeded) {
+              // 1. TSC VERIFY
               const v = await runVerify();
               send({ type: 'verify', ok: v.ok, command: v.command, output: v.output });
-              if (v.ok) { verifyFailCount = 0; }
-              else {
+              
+              if (!v.ok) {
                 verifyFailCount++;
                 if (verifyFailCount > MAX_VERIFY_FAILS) { convo.push({ role: 'user', content: `Auto-verify FAILED ${verifyFailCount} times. STOP.\n\n${v.output}` }); }
                 else { convo.push({ role: 'user', content: `Auto-verify FAILED:\n\n${v.output}\n\nFix this immediately.` }); }
+              } else {
+                verifyFailCount = 0;
+                // 2. NAYA: REVIEWER AGENT (With safe path check)
+                if (typeof tc.args.path === 'string') {
+                  send({ type: 'review_start', file: tc.args.path });
+                  try {
+                    const fullPath = path.resolve(WORKSPACE, tc.args.path);
+                    const contentToReview = await fs.readFile(fullPath, 'utf-8');
+                    const review = await reviewCode(tc.args.path, contentToReview);
+                    send({ type: 'review_result', ok: review.ok, feedback: review.feedback });
+                    
+                    if (!review.ok) {
+                      convo.push({ role: 'user', content: `Reviewer Agent REJECTED your code for ${tc.args.path}:\n\n${review.feedback}\n\nFix the code according to this review.` });
+                    }
+                  } catch (e: any) {
+                    send({ type: 'review_result', ok: false, feedback: e.message });
+                  }
+                }
               }
             }
           }
