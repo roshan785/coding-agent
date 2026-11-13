@@ -1,7 +1,6 @@
 'use client';
 
-import { forwardRef, useId } from 'react';
-import type { InputHTMLAttributes, ReactNode } from 'react';
+import { forwardRef, useId, type InputHTMLAttributes, type ReactNode } from 'react';
 
 export type InputSize = 'sm' | 'md' | 'lg';
 

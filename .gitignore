@@ -34,3 +34,4 @@ next-env.d.ts
 .env.local
 .env*.local
 .agent_chats/
+.agent_backups/

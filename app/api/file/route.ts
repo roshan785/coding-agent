@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
+import { errorMessage } from '@/types';
 
 const WORKSPACE = process.cwd();
 
@@ -14,7 +15,7 @@ export async function GET(req: NextRequest) {
   try {
     const content = await fs.readFile(full, 'utf-8');
     return Response.json({ content: content.slice(0, 20000) });
-  } catch (e: any) {
-    return Response.json({ error: e.message }, { status: 500 });
+  } catch (e: unknown) {
+    return Response.json({ error: errorMessage(e) }, { status: 500 });
   }
 }

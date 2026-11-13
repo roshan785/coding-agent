@@ -1,8 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import type { ReactNode } from 'react';
 
 export interface ModalProps {
   /** Controls whether the modal is rendered. */

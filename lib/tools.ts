@@ -8,36 +8,44 @@ const execAsync = promisify(exec);
 const WORKSPACE = process.cwd();
 const USER_DOCS = path.join(process.env.HOME || '/home/chau', 'Documents');
 const BACKUP_DIR = path.join(WORKSPACE, '.agent_backups');
-const IGNORE_DIRS = ['node_modules', '.git', '.next', '.agent_backups', '.agent_chats', 'dist', 'build', 'coverage'];
+const SNAPSHOT_DIR = path.join(WORKSPACE, '.agent_snapshots');
+const IGNORE_DIRS = ['node_modules', '.git', '.next', '.agent_backups', '.agent_chats', '.agent_snapshots', 'dist', 'build', 'coverage'];
+
+// ═══════════════════════════════════════════════════════════
+// CORE FILES: Self-update REQUIRES self_edit tool
+// ═══════════════════════════════════════════════════════════
+const CORE_FILES = [
+  'lib/tools.ts',
+  'lib/multiAgent.ts',
+  'app/api/chat/route.ts',
+  'app/api/multi-chat/route.ts',
+  'app/page.tsx',
+  'app/multi/page.tsx',
+];
+
+function isCoreFile(p: string): boolean {
+  const normalized = p.replace(/^\.\//, '').replace(/\/+$/, '');
+  return CORE_FILES.some((cf) => normalized === cf || normalized.endsWith('/' + cf));
+}
 
 export const toolSchemas = [
-  { 
-    type: 'function', 
-    function: { 
-      name: 'open_url', 
-      description: 'Open a website. Accepts either a full URL (https://x.com) OR a project name (e.g. "GentMart"). If a project name, finds it in ~/Documents/, detects its port, starts the dev server if not running, then opens it. No questions asked.', 
-      parameters: { 
-        type: 'object', 
-        properties: { 
-          target: { type: 'string', description: 'URL or project name' } 
-        }, 
-        required: ['target'] 
-      } 
-    } 
-  },
+  { type: 'function', function: { name: 'open_url', description: 'Open a URL or project name in browser (auto-finds & starts projects).', parameters: { type: 'object', properties: { target: { type: 'string' } }, required: ['target'] } } },
   { type: 'function', function: { name: 'scan_project', description: 'Get project structure.', parameters: { type: 'object', properties: { max_depth: { type: 'number' } } } } },
   { type: 'function', function: { name: 'grep_search', description: 'Search for a text pattern.', parameters: { type: 'object', properties: { pattern: { type: 'string' }, file_glob: { type: 'string' } }, required: ['pattern'] } } },
   { type: 'function', function: { name: 'update_plan', description: 'Create a checklist of steps.', parameters: { type: 'object', properties: { plan: { type: 'array', items: { type: 'string' } } }, required: ['plan'] } } },
   { type: 'function', function: { name: 'read_file', description: 'Read a file.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } } },
-  { type: 'function', function: { name: 'write_file', description: 'Create a NEW file only.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
-  { type: 'function', function: { name: 'edit_file', description: 'Surgical string replace in existing file.', parameters: { type: 'object', properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['path', 'old_string', 'new_string'] } } },
+  { type: 'function', function: { name: 'write_file', description: 'Create a NEW file only. BLOCKED if exists.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } } },
+  { type: 'function', function: { name: 'edit_file', description: 'Surgical replace. Use for NON-core files only.', parameters: { type: 'object', properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['path', 'old_string', 'new_string'] } } },
+  { type: 'function', function: { name: 'self_edit', description: 'Surgical self-modification for CORE files. Takes snapshot → validates tsc → auto-rollback. Use for small changes.', parameters: { type: 'object', properties: { path: { type: 'string' }, old_string: { type: 'string' }, new_string: { type: 'string' } }, required: ['path', 'old_string', 'new_string'] } } },
+  { type: 'function', function: { name: 'self_rewrite', description: 'Full file rewrite for CORE files. Use ONLY for major refactoring (e.g., converting page.tsx to Server Component). Takes snapshot → tsc validates → auto-rollback on failure. Requires reason.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string', description: 'Complete new file content' }, reason: { type: 'string', description: 'Why full rewrite is necessary' } }, required: ['path', 'content', 'reason'] } } },
+  { type: 'function', function: { name: 'verify_agent_health', description: 'Check if the agent itself is alive (ping localhost:3000). Run this after self_edit + restart.', parameters: { type: 'object', properties: {} } } },
   { type: 'function', function: { name: 'bash', description: 'Run a READ-ONLY bash command or background process.', parameters: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] } } },
   { type: 'function', function: { name: 'check_build', description: 'Run npm run build.', parameters: { type: 'object', properties: {} } } },
 ];
 
 const HARD_BLOCK = ['rm -rf /', ':(){', '> /dev/sd', 'mkfs', 'dd if=/dev/zero', 'shutdown', 'reboot'];
 const READONLY_GIT = ['status', 'diff', 'log', 'show', 'branch', 'remote', 'config', 'rev-parse', 'ls-files', 'blame'];
-const SAFE_PREFIXES = ['ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'wc', 'pwd', 'which', 'file', 'stat', 'du', 'df', 'tree', 'echo', 'node', 'npm', 'npx', 'cargo', 'rustc', 'git', 'nohup', 'xdg-open', 'curl'];
+const SAFE_PREFIXES = ['ls', 'cat', 'head', 'tail', 'grep', 'rg', 'find', 'wc', 'pwd', 'which', 'file', 'stat', 'du', 'df', 'tree', 'echo', 'node', 'npm', 'npx', 'cargo', 'rustc', 'git', 'nohup', 'xdg-open', 'curl', 'sleep'];
 
 function isShellWrite(cmd: string): { isWrite: boolean; reason?: string } {
   if (cmd.includes('> /tmp/') || cmd.includes('>> /tmp/')) return { isWrite: false };
@@ -60,13 +68,24 @@ function isShellWrite(cmd: string): { isWrite: boolean; reason?: string } {
 }
 
 export function needsApproval(name: string, args: any): { need: boolean; reason?: string; blocked?: boolean } {
-  if (name === 'read_file' || name === 'update_plan' || name === 'check_build' || name === 'scan_project' || name === 'grep_search' || name === 'open_url') return { need: false };
-  if (name === 'write_file' || name === 'edit_file') return { need: true, reason: 'File modification' };
+  if (name === 'read_file' || name === 'update_plan' || name === 'check_build' || name === 'scan_project' || name === 'grep_search' || name === 'open_url' || name === 'verify_agent_health') return { need: false };
+  if (name === 'write_file' || name === 'edit_file' || name === 'self_edit' || name === 'self_rewrite') {
+    const p = String(args.path || '');
+    // edit_file and write_file refuse core files
+    if ((name === 'edit_file' || name === 'write_file') && isCoreFile(p)) {
+      return { need: false, blocked: true, reason: `⛔ ${p} is a CORE file. Use ${name === 'write_file' ? 'self_rewrite' : 'self_edit'} tool instead (has snapshot + auto-rollback protection).` };
+    }
+    // self_rewrite only for core files
+    if (name === 'self_rewrite' && !isCoreFile(p)) {
+      return { need: false, blocked: true, reason: `⛔ self_rewrite is for CORE files only. Use write_file for new files or edit_file for non-core edits.` };
+    }
+    return { need: true, reason: 'File modification' };
+  }
   if (name === 'bash') {
     const cmd = String(args.command || '');
     if (HARD_BLOCK.some((d) => cmd.includes(d))) return { need: false, blocked: true, reason: 'catastrophic' };
     const writeCheck = isShellWrite(cmd);
-    if (writeCheck.isWrite) return { need: false, blocked: true, reason: `⛔ ${writeCheck.reason} FORBIDDEN.` };
+    if (writeCheck.isWrite) return { need: false, blocked: true, reason: `⛔ ${writeCheck.reason} FORBIDDEN. Use edit_file.` };
     const parts = cmd.trim().split(/\s+/);
     if (parts[0] === 'git') {
       const sub = parts[1] || '';
@@ -83,7 +102,7 @@ function resolveSafe(p: string): string {
   const full = path.resolve(p);
   const isInsideAgent = full.startsWith(WORKSPACE);
   const isInsideDocs = full.startsWith(USER_DOCS);
-  if (!isInsideAgent && !isInsideDocs) throw new Error('Path outside allowed');
+  if (!isInsideAgent && !isInsideDocs) throw new Error('Path outside allowed workspace');
   if (isInsideAgent && (p.includes('AGENT_RULES.md') || p.includes('.env') || p.includes('.git/'))) throw new Error('Protected file');
   return full;
 }
@@ -97,7 +116,7 @@ export async function loadMemory(): Promise<string> {
 }
 
 export async function getPreviewDiff(name: string, args: any): Promise<string | null> {
-  if (name !== 'write_file' && name !== 'edit_file') return null;
+  if (name !== 'write_file' && name !== 'edit_file' && name !== 'self_edit') return null;
   try {
     const full = resolveSafe(String(args.path || ''));
     let oldStr = '';
@@ -154,7 +173,144 @@ async function verifyAndSave(fullPath: string, newContent: string) {
     await fs.rename(tmpPath, fullPath);
   } catch (e: any) {
     await fs.unlink(tmpPath).catch(() => {});
-    throw new Error(`SAFETY: TypeScript failed.\n\n${((e.stdout || '') + (e.stderr || '')).trim()}`);
+    throw new Error(`SAFETY: TypeScript failed.\n\n${((e.stdout || '') + (e.stderr || '')).trim().slice(0, 3000)}`);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════
+// 10/10 SELF-EDIT: snapshot → validate → tsc → rollback on fail
+// ═══════════════════════════════════════════════════════════
+async function selfEdit(filePath: string, oldString: string, newString: string): Promise<string> {
+  const full = path.resolve(WORKSPACE, filePath);
+  const fileName = path.basename(filePath);
+
+  if (!(await fileExists(full))) throw new Error(`${filePath} does not exist. Use write_file for new files.`);
+
+  const original = await fs.readFile(full, 'utf-8');
+
+  // 1. Snapshot
+  await fs.mkdir(SNAPSHOT_DIR, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const snapshotPath = path.join(SNAPSHOT_DIR, `${ts}_${fileName}`);
+  await fs.writeFile(snapshotPath, original, 'utf-8');
+
+  // 2. Uniqueness check
+  if (!oldString) throw new Error('old_string is empty');
+  const count = original.split(oldString).length - 1;
+  if (count === 0) throw new Error(`old_string not found in ${fileName}. Read the file first and copy exact text.`);
+  if (count > 1) throw new Error(`old_string appears ${count} times in ${fileName}. Include more context to make it unique.`);
+
+  const updated = original.replace(oldString, newString);
+
+  // 3. Critical marker check (per file type)
+  const CRITICAL_MARKERS: Record<string, string[]> = {
+    'page.tsx': ['export default function'],  // 'use client' removed — tsc catches real breaks
+    'route.ts': ['export async function POST'],
+    'tools.ts': ['export async function executeTool', 'export const toolSchemas'],
+    'multiAgent.ts': ['export async function runMultiAgent'],
+  };
+  for (const [key, markers] of Object.entries(CRITICAL_MARKERS)) {
+    if (fileName === key) {
+      for (const m of markers) {
+        if (original.includes(m) && !updated.includes(m)) {
+          throw new Error(`⛔ BLOCKED: This edit would remove critical marker "${m}" from ${fileName}. This would break the agent. Aborted. Snapshot saved at ${path.basename(snapshotPath)}.`);
+        }
+      }
+    }
+  }
+
+  // 4. Apply to disk
+  await fs.writeFile(full, updated, 'utf-8');
+
+  // 5. tsc validation
+  try {
+    await execAsync('npx tsc --noEmit', { cwd: WORKSPACE, timeout: 90000 });
+  } catch (e: any) {
+    // 6. Rollback
+    await fs.writeFile(full, original, 'utf-8');
+    const err = ((e.stdout || '') + (e.stderr || '')).slice(0, 3000);
+    throw new Error(`⛔ SELF-EDIT FAILED. TypeScript broke. Auto-reverted ${fileName} to previous working version.\n\nTypeScript errors:\n${err}\n\n💡 Hint: Read the file again. You may need to fix MULTIPLE errors in one edit, not just one.`);
+  }
+
+  // 7. Success
+  const isRoute = fileName === 'route.ts';
+  const isPage = fileName === 'page.tsx';
+  const isTools = fileName === 'tools.ts' || fileName === 'multiAgent.ts';
+  const restartNote = (isRoute || isPage || isTools)
+    ? '\n\n⚠️ This file triggers dev server restart. Your chat stream will end cleanly. After restart (~3s), verify with verify_agent_health in next message.'
+    : '';
+
+  return `✅ Self-edited ${fileName} safely. Snapshot: ${path.basename(snapshotPath)}${restartNote}`;
+}
+
+// ═══════════════════════════════════════════════════════════
+// SELF-REWRITE: Full file replacement with safety net
+// For legitimate refactoring (e.g., page.tsx → Server Component)
+// ═══════════════════════════════════════════════════════════
+async function selfRewrite(filePath: string, newContent: string, reason: string): Promise<string> {
+  const full = path.resolve(WORKSPACE, filePath);
+  const fileName = path.basename(filePath);
+
+  if (!(await fileExists(full))) throw new Error(`${filePath} does not exist. Use write_file for new files.`);
+
+  if (!newContent || newContent.trim().length < 20) {
+    throw new Error(`Refusing to write ${fileName}: content is too short (${newContent.length} bytes). Likely truncated.`);
+  }
+
+  const original = await fs.readFile(full, 'utf-8');
+
+  // Snapshot before touching anything
+  await fs.mkdir(SNAPSHOT_DIR, { recursive: true });
+  const ts = new Date().toISOString().replace(/[:.]/g, '-');
+  const snapshotPath = path.join(SNAPSHOT_DIR, `${ts}_${fileName}`);
+  await fs.writeFile(snapshotPath, original, 'utf-8');
+
+  // Structural validation: new content MUST have export default function for page/layout
+  if (fileName === 'page.tsx' || fileName === 'layout.tsx') {
+    if (!newContent.includes('export default function') && !newContent.includes('export default async function')) {
+      throw new Error(`⛔ BLOCKED: ${fileName} rewrite must contain "export default function". Otherwise Next.js cannot route it.`);
+    }
+  }
+
+  // For route.ts: must have POST or GET handler
+  if (fileName === 'route.ts') {
+    if (!newContent.includes('export async function POST') && !newContent.includes('export async function GET')) {
+      throw new Error(`⛔ BLOCKED: ${fileName} rewrite must contain POST or GET handler.`);
+    }
+  }
+
+  // Write to disk
+  await fs.writeFile(full, newContent, 'utf-8');
+
+  // Validate with tsc — if it fails, rollback
+  try {
+    await execAsync('npx tsc --noEmit', { cwd: WORKSPACE, timeout: 90000 });
+  } catch (e: any) {
+    await fs.writeFile(full, original, 'utf-8');
+    const err = ((e.stdout || '') + (e.stderr || '')).slice(0, 3000);
+    throw new Error(`⛔ SELF-REWRITE FAILED. TypeScript broke. Auto-reverted ${fileName} to previous version.\n\nReason user requested: ${reason}\n\nTypeScript errors:\n${err}`);
+  }
+
+  const restartNote = '\n\n⚠️ This file triggers dev server restart. Your chat stream will end cleanly. After restart (~3s), verify with verify_agent_health in next message.';
+  return `✅ Self-rewrote ${fileName} safely (${newContent.length} bytes, reason: ${reason}). Snapshot: ${path.basename(snapshotPath)}${restartNote}`;
+}
+
+// ═══════════════════════════════════════════════════════════
+// HEALTH CHECK: Verify agent still works after self-edit
+// ═══════════════════════════════════════════════════════════
+async function verifyHealth(): Promise<string> {
+  try {
+    const { stdout } = await execAsync(
+      'curl -s -o /dev/null -w "%{http_code}" --max-time 5 http://localhost:3000/',
+      { timeout: 8000 }
+    );
+    const code = stdout.trim();
+    if (code === '200' || code === '304' || code === '301') {
+      return `✅ Agent healthy (HTTP ${code}). Ready to continue.`;
+    }
+    return `⚠️ Agent returned HTTP ${code}. May be restarting. Wait 5-10s and try again.`;
+  } catch (e: any) {
+    return `❌ Agent not responding (${e.message}). Dev server may still be restarting. Wait 10s and retry.`;
   }
 }
 
@@ -214,115 +370,74 @@ async function scanProject(maxDepth: number): Promise<string> {
   return result.slice(0, 12000);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// SMART OPEN: URL → direct, Project Name → detect + start + open
-// ═══════════════════════════════════════════════════════════════
 async function smartOpen(target: string, onOutput?: (s: string) => void): Promise<string> {
   const t = target.trim();
-
-  // CASE 1: Full URL → open directly
   if (t.startsWith('http://') || t.startsWith('https://')) {
     onOutput?.(`🌐 Opening ${t}...\n`);
     spawn('xdg-open', [t], { detached: true, stdio: 'ignore' }).unref();
-    return `✅ Opened ${t} in browser.`;
+    return `✅ Opened ${t}`;
   }
-
-  // CASE 2: localhost:port → add http:// and open
   if (/^localhost:\d+/.test(t) || /^127\.0\.0\.1:\d+/.test(t)) {
     const url = `http://${t}`;
-    onOutput?.(`🌐 Opening ${url}...\n`);
     spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
-    return `✅ Opened ${url}.`;
+    return `✅ Opened ${url}`;
   }
 
-  // CASE 3: Project name → find in ~/Documents
+  // Project name → find, detect port, start server, open
   const projectName = t.toLowerCase().replace(/\s+/g, '');
-  
-  // Try exact matches first, then case-insensitive
   let projectPath = '';
   try {
     const docs = await fs.readdir(USER_DOCS, { withFileTypes: true });
     const dirs = docs.filter((d) => d.isDirectory());
-    
-    // Exact or case-insensitive match
-    const exact = dirs.find((d) => d.name === target || d.name.toLowerCase() === target.toLowerCase());
-    if (exact) {
-      projectPath = path.join(USER_DOCS, exact.name);
-    } else {
-      // Fuzzy: contains
+    const exact = dirs.find((d) => d.name === t || d.name.toLowerCase() === t.toLowerCase());
+    if (exact) projectPath = path.join(USER_DOCS, exact.name);
+    else {
       const fuzzy = dirs.find((d) => d.name.toLowerCase().includes(projectName));
       if (fuzzy) projectPath = path.join(USER_DOCS, fuzzy.name);
     }
   } catch {}
+  if (!projectPath) throw new Error(`Project "${target}" not found in ~/Documents/`);
 
-  if (!projectPath) {
-    throw new Error(`Project "${target}" not found in ~/Documents/. Available: ${(await fs.readdir(USER_DOCS)).filter(d => !d.startsWith('.')).join(', ')}`);
-  }
-
-  onOutput?.(`📂 Found project: ${projectPath}\n`);
-
-  // Read package.json to find port
+  onOutput?.(`📂 Found: ${projectPath}\n`);
   let port = 3000;
   try {
     const pkgRaw = await fs.readFile(path.join(projectPath, 'package.json'), 'utf-8');
     const pkg = JSON.parse(pkgRaw);
     const devScript = String(pkg.scripts?.dev || '');
-    // Try to extract port: -p 4100 or --port 4100 or PORT=4100
     const portMatch = devScript.match(/(?:-p|--port)\s+(\d+)/) || devScript.match(/PORT=(\d+)/);
     if (portMatch) port = parseInt(portMatch[1], 10);
     else if (pkg.name?.toLowerCase().includes('genmart')) port = 4100;
   } catch {}
 
-  onOutput?.(`🔍 Detected port: ${port}\n`);
-
-  // Check if server is already running
+  onOutput?.(`🔍 Port: ${port}\n`);
   let isRunning = false;
   try {
     const check = await execAsync(`curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://localhost:${port}`, { timeout: 5000 });
-    if (check.stdout.trim() === '200' || check.stdout.trim() === '304' || check.stdout.trim() === '301') {
-      isRunning = true;
-    }
+    if (['200', '304', '301'].includes(check.stdout.trim())) isRunning = true;
   } catch {}
 
-  if (isRunning) {
-    onOutput?.(`✅ Server already running on port ${port}\n`);
-  } else {
-    // Check if node_modules exist
+  if (!isRunning) {
     const hasNodeModules = await fileExists(path.join(projectPath, 'node_modules'));
     if (!hasNodeModules) {
-      onOutput?.(`📦 Installing dependencies...\n`);
-      try {
-        await execAsync('npm install', { cwd: projectPath, timeout: 180000 });
-      } catch (e: any) {
-        throw new Error(`npm install failed: ${e.message}`);
-      }
+      onOutput?.(`📦 Installing...\n`);
+      try { await execAsync('npm install', { cwd: projectPath, timeout: 180000 }); } catch (e: any) { throw new Error(`npm install failed: ${e.message}`); }
     }
-
-    // Start dev server in background
-    onOutput?.(`🚀 Starting dev server on port ${port}...\n`);
+    onOutput?.(`🚀 Starting server...\n`);
     const logFile = `/tmp/${path.basename(projectPath)}.log`;
     spawn('bash', ['-c', `cd "${projectPath}" && nohup npm run dev > ${logFile} 2>&1 &`], { detached: true, stdio: 'ignore' }).unref();
 
-    // Wait up to 30s for server
     let ready = false;
     for (let i = 0; i < 15; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       try {
         const check = await execAsync(`curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://localhost:${port}`, { timeout: 5000 });
-        const code = check.stdout.trim();
-        if (code === '200' || code === '304' || code === '301') { ready = true; break; }
+        if (['200', '304', '301'].includes(check.stdout.trim())) { ready = true; break; }
       } catch {}
     }
-
-    if (!ready) {
-      throw new Error(`Server did not start in 30s. Check ${logFile} for errors.`);
-    }
-    onOutput?.(`✅ Server ready on port ${port}\n`);
+    if (!ready) throw new Error(`Server didn't start in 30s. Check ${logFile}`);
   }
 
-  // Open in browser
   const url = `http://localhost:${port}`;
-  onOutput?.(`🌐 Opening ${url}...\n`);
   spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
   return `✅ Opened ${path.basename(projectPath)} at ${url}`;
 }
@@ -334,8 +449,19 @@ export async function executeTool(name: string, args: any, onOutput?: (chunk: st
   try {
     if (name === 'open_url') {
       const target = String(args.target || args.url || '');
-      if (!target) throw new Error('target (URL or project name) is required');
+      if (!target) throw new Error('target required');
       result = await smartOpen(target, onOutput);
+    } else if (name === 'verify_agent_health') {
+      onOutput?.(`🏥 Checking agent health...\n`);
+      result = await verifyHealth();
+    } else if (name === 'self_edit') {
+      onOutput?.(`🛡️ Self-editing ${args.path} (snapshot + tsc validate)...\n`);
+      result = await selfEdit(String(args.path || ''), String(args.old_string || ''), String(args.new_string || ''));
+      onOutput?.(`${result}\n`);
+    } else if (name === 'self_rewrite') {
+      onOutput?.(`🛡️ Self-rewriting ${args.path} (snapshot + tsc validate)...\n`);
+      result = await selfRewrite(String(args.path || ''), String(args.content || ''), String(args.reason || 'user request'));
+      onOutput?.(`${result}\n`);
     } else if (name === 'scan_project') {
       result = await scanProject(args.max_depth || 3);
     } else if (name === 'grep_search') {
@@ -351,11 +477,11 @@ export async function executeTool(name: string, args: any, onOutput?: (chunk: st
       result = content.length > 20000 ? content.slice(0, 20000) + '\n...(truncated)' : content;
     } else if (name === 'write_file') {
       const full = resolveSafe(String(args.path || ''));
-      if (await fileExists(full)) throw new Error(`⛔ REWRITE BLOCKED: ${args.path} exists. Use edit_file.`);
-      onOutput?.(`📝 Creating NEW file ${args.path}...\n`);
+      if (await fileExists(full)) throw new Error(`⛔ REWRITE BLOCKED: ${args.path} exists. Use ${isCoreFile(args.path) ? 'self_edit' : 'edit_file'}.`);
+      onOutput?.(`📝 Creating NEW ${args.path}...\n`);
       await fs.mkdir(path.dirname(full), { recursive: true });
       await verifyAndSave(full, String(args.content ?? ''));
-      result = `✅ Created ${args.path}.`;
+      result = `✅ Created ${args.path}`;
     } else if (name === 'edit_file') {
       const full = resolveSafe(String(args.path || ''));
       if (!(await fileExists(full))) throw new Error(`File ${args.path} does not exist.`);

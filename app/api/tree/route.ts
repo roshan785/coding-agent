@@ -1,13 +1,14 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs/promises';
 import path from 'path';
+import { errorMessage, type FileTreeNode } from '@/types';
 
 const WORKSPACE = process.cwd();
 const IGNORE = ['node_modules', '.git', '.next', '.agent_backups', 'dist', 'build', '.env'];
 
-async function walk(dir: string, base: string): Promise<any[]> {
+async function walk(dir: string, base: string): Promise<FileTreeNode[]> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
-  const result = [];
+  const result: FileTreeNode[] = [];
   
   for (const entry of entries) {
     if (IGNORE.includes(entry.name)) continue;
@@ -41,7 +42,7 @@ export async function GET() {
   try {
     const tree = await walk(WORKSPACE, WORKSPACE);
     return NextResponse.json({ tree });
-  } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 });
+  } catch (e: unknown) {
+    return NextResponse.json({ error: errorMessage(e) }, { status: 500 });
   }
 }

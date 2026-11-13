@@ -1,5 +1,6 @@
 import { NextRequest } from 'next/server';
 import { listSessions, saveSession } from '@/lib/chatHistory';
+import { errorMessage } from '@/types';
 
 
 export async function GET() {
@@ -21,8 +22,8 @@ export async function POST(req: NextRequest) {
       updatedAt: now,
     });
     return Response.json({ ok: true });
-  } catch (e: any) {
+  } catch (e: unknown) {
     console.error('[POST /api/history]', e);
-    return Response.json({ error: e.message }, { status: 500 });
+    return Response.json({ error: errorMessage(e) }, { status: 500 });
   }
 }

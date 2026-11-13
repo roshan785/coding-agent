@@ -1,5 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
+import { ChatCompletionResponse, errorMessage } from '@/types';
 
 const API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const MODEL = 'deepseek-chat';
@@ -36,15 +37,15 @@ If the code has issues, reply with: "FAIL: <brief explanation of issues>"`;
         temperature: 0,
       }),
     });
-    const data = await res.json();
-    const result = data.choices[0].message.content.trim();
+    const data = (await res.json()) as ChatCompletionResponse;
+    const result = (data.choices[0]?.message.content ?? '').trim();
     
     if (result.startsWith('PASS')) {
       return { ok: true, feedback: 'Code passed review.' };
     } else {
       return { ok: false, feedback: result };
     }
-  } catch (e: any) {
-    return { ok: false, feedback: `Review failed: ${e.message}` };
+  } catch (e) {
+    return { ok: false, feedback: `Review failed: ${errorMessage(e)}` };
   }
 }

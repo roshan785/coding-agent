@@ -83,3 +83,134 @@ html.light .hover\:text-zinc-200:hover {
 html.light .bg-zinc-950\/80 {
   background-color: rgba(255, 255, 255, 0.8);
 }
+
+/* ==========================================================================
+   Calculator page (/calculator)
+   Dark-theme shell, responsive 4-column keypad, hover/active states.
+   ========================================================================== */
+
+.calc-page {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem 1rem;
+  background:
+    radial-gradient(circle at 50% 0%, #1e293b 0%, transparent 60%),
+    #09090b;
+}
+
+.calc-shell {
+  width: 100%;
+  max-width: 22rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  padding: 1.25rem;
+  border-radius: 1.5rem;
+  border: 1px solid #27272a;
+  background-color: #18181b;
+  box-shadow:
+    0 24px 48px -12px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+
+.calc-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.calc-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: #fafafa;
+}
+
+.calc-subtitle {
+  font-size: 0.6875rem;
+  color: #71717a;
+}
+
+/* ---- Keypad grid ---- */
+
+.calc-keypad {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+/* ---- Keypad buttons ---- */
+
+.calc-keypad button {
+  height: 3.5rem;
+  border-radius: 0.875rem;
+  font-size: 1.25rem;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background-color 120ms ease,
+    transform 80ms ease,
+    box-shadow 120ms ease;
+}
+
+.calc-keypad button:hover {
+  filter: brightness(1.12);
+}
+
+.calc-keypad button:active {
+  transform: scale(0.96);
+  filter: brightness(0.92);
+}
+
+.calc-keypad button:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 2px #18181b,
+    0 0 0 4px #f97316;
+}
+
+/* ---- Responsive tuning ---- */
+
+@media (max-width: 380px) {
+  .calc-shell {
+    padding: 1rem;
+    border-radius: 1.25rem;
+  }
+
+  .calc-keypad {
+    gap: 0.375rem;
+  }
+
+  .calc-keypad button {
+    height: 3rem;
+    font-size: 1.125rem;
+  }
+}
+
+@media (min-width: 640px) {
+  .calc-shell {
+    max-width: 24rem;
+    padding: 1.5rem;
+  }
+
+  .calc-keypad button {
+    height: 3.75rem;
+    font-size: 1.375rem;
+  }
+}
+
+/* Respect reduced-motion preferences. */
+@media (prefers-reduced-motion: reduce) {
+  .calc-keypad button {
+    transition: none;
+  }
+
+  .calc-keypad button:active {
+    transform: none;
+  }
+}
