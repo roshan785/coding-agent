@@ -286,6 +286,7 @@ export default function Home() {
           <div className={`w-2 h-2 rounded-full ${loading ? 'bg-amber-400 animate-pulse' : 'bg-green-500'}`} />
           <h1 className="font-semibold text-sm">Coding Agent</h1>
           {savingStatus && <span className="text-[10px] text-zinc-500">{savingStatus}</span>}
+          <a href="/multi" className="text-xs text-blue-400 hover:underline px-2">🤖 Multi-Agent</a>
           <span className="ml-auto text-xs text-zinc-500">{loading ? 'working…' : 'idle'}</span>
         </header>
 
