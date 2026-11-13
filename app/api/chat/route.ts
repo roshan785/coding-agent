@@ -7,7 +7,7 @@ import path from 'path';
 
 const API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const MODEL = 'deepseek-chat';
-const MAX_TURNS = 35; // थप बढाइयो किनभने plan execute गर्न टाइम लाग्छ
+const MAX_TURNS = 40;
 const MAX_VERIFY_FAILS = 3;
 const WORKSPACE = process.cwd();
 
@@ -21,14 +21,15 @@ async function getProjectContext() {
 }
 
 export async function POST(req: NextRequest) {
-  const { messages } = await req.json();
+  const { messages, autoApprove } = await req.json();
   const apiKey = process.env.DEEPSEEK_API_KEY;
   if (!apiKey) return new Response(JSON.stringify({ error: 'DEEPSEEK_API_KEY not set' }), { status: 500 });
 
   const rules = await loadRules();
   const projectContext = await getProjectContext();
   
-  const SYSTEM_PROMPT = `You are a STRICT, RULE-BOUND coding agent running on the user's Linux machine.
+  // SYSTEM PROMPT: अब कुनै नियम दोहोरिएको छैन। केवल Rules फाइल पढ्न भनिएको छ।
+  const SYSTEM_PROMPT = `You are an autonomous coding agent. You MUST strictly follow the PROJECT CONSTITUTION below.
 
 ============== PROJECT CONSTITUTION ==============
 ${rules}
@@ -37,21 +38,17 @@ ${rules}
 CURRENT WORKSPACE CONTEXT:
 ${projectContext}
 
-TOOLS:
-- update_plan(plan: string[]): Create a step-by-step checklist for complex tasks.
+AVAILABLE TOOLS:
+- update_plan(plan: string[]): Use for complex tasks.
 - read_file(path)
-- write_file(path, content): overwrite (NEW files only)
-- edit_file(path, old_string, new_string): surgical replace (PREFERRED)
+- write_file(path, content): Only for NEW files.
+- edit_file(path, old_string, new_string): PREFERRED for edits.
 - bash(command)
 
-WORKFLOW RULES:
-1. ALWAYS read_file before editing.
-2. For edits use edit_file with UNIQUE old_string.
-3. write_file only for NEW files.
-4. AUTO-VERIFY: after every write/edit, system runs verification. If it FAILS, fix it with edit_file (Max 3 times).
-5. If the user asks you to do something that violates the PROJECT CONSTITUTION, you MUST refuse.
-6. For COMPLEX tasks (e.g., "build a login page", "refactor X"), you MUST use \`update_plan\` first to outline the steps. Then execute them one by one.
-7. Never fabricate file contents. Be concise.`;
+Instructions:
+- You are in a LOOP. Continue using tools until the task is fully complete and verified.
+- Do not ask for permission in text; if you need to run a tool, just run it.
+- The system will automatically ask the user for permission if needed, and auto-verify after edits.`;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -115,7 +112,6 @@ WORKFLOW RULES:
               continue;
             }
 
-            // NAYA: Plan intercept
             if (tc.function.name === 'update_plan') {
               send({ type: 'plan', plan: args.plan || [] });
               send({ type: 'tool_result', name: 'update_plan', args, result: 'Plan updated.' });
@@ -124,8 +120,12 @@ WORKFLOW RULES:
             }
 
             const previewDiff = await getPreviewDiff(tc.function.name, args);
+            const isWrite = tc.function.name === 'write_file' || tc.function.name === 'edit_file';
+            
+            // Auto-approve logic
+            const needsPrompt = check.need && !(autoApprove && isWrite);
 
-            if (check.need) {
+            if (needsPrompt) {
               const reqId = randomUUID();
               send({ type: 'permission_request', id: reqId, tool: tc.function.name, args, reason: check.reason, diff: previewDiff });
               send({ type: 'tool_start', name: tc.function.name, args });
@@ -144,7 +144,6 @@ WORKFLOW RULES:
             send({ type: 'tool_result', name: tc.function.name, args, result: result.result });
             convo.push({ role: 'tool', tool_call_id: tc.id, content: result.result });
 
-            const isWrite = tc.function.name === 'write_file' || tc.function.name === 'edit_file';
             const succeeded = !result.result.startsWith('Error') && !result.result.startsWith('Blocked');
             if (isWrite && succeeded) {
               const v = await runVerify();
