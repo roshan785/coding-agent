@@ -71,7 +71,9 @@ export default function Home() {
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [previewContent, setPreviewContent] = useState<string>('');
   const [loadingPreview, setLoadingPreview] = useState(false);
-  const [autoApprove, setAutoApprove] = useState(false);
+  
+  // NAYA: Auto-Approve is TRUE by default (always ON)
+  const [autoApprove, setAutoApprove] = useState(true);
 
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -94,7 +96,6 @@ export default function Home() {
     try { await fetch('/api/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: req.id, approved }) }); } catch {}
   }
 
-  // NAYA: Undo Function
   async function undoLastChange() {
     if (!confirm("के तपाईं पक्का हुनुहुन्छ? Agent ले गरेको पछिल्लो परिवर्तन उल्टाइनेछ (Undo)।")) return;
     try {
@@ -106,13 +107,9 @@ export default function Home() {
       const data = await res.json();
       if (data.ok) {
         alert("Undo सफल भयो!");
-        window.location.reload(); // Refresh to clear chat and reload tree
-      } else {
-        alert("Undo failed: " + data.error);
-      }
-    } catch (e) {
-      alert("Error during Undo");
-    }
+        window.location.reload();
+      } else { alert("Undo failed: " + data.error); }
+    } catch (e) { alert("Error during Undo"); }
   }
 
   async function send(text?: string) {
@@ -190,7 +187,7 @@ export default function Home() {
       <div className="flex-1 flex flex-col min-w-0">
         <header className="border-b border-zinc-800 px-6 py-3 flex items-center gap-3 shrink-0">
           <div className={`w-2 h-2 rounded-full ${loading ? 'bg-amber-400 animate-pulse' : 'bg-green-500'}`} />
-          <h1 className="font-semibold text-sm">Coding Agent · Auto-Checkpoint</h1>
+          <h1 className="font-semibold text-sm">Coding Agent · Autonomous</h1>
           
           <button onClick={undoLastChange} disabled={loading} className="ml-auto text-xs bg-zinc-800 hover:bg-zinc-700 px-3 py-1 rounded-md transition disabled:opacity-50 text-red-400 font-medium">
             ↩️ Undo
@@ -201,7 +198,7 @@ export default function Home() {
             ⚡ Auto-Approve
           </label>
           
-          <span className="text-xs text-zinc-500 border-l border-zinc-700 pl-3">{permissionReq ? 'waiting approval…' : loading ? 'streaming…' : 'idle'}</span>
+          <span className="text-xs text-zinc-500 border-l border-zinc-700 pl-3">{loading ? 'working…' : 'idle'}</span>
         </header>
 
         <div className="flex-1 overflow-y-auto px-4 sm:px-6 py-4">
@@ -268,34 +265,6 @@ export default function Home() {
           </div>
         </div>
       </div>
-
-      {permissionReq && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-zinc-900 border border-zinc-700 rounded-xl max-w-2xl w-full p-5 shadow-2xl">
-            <h3 className="font-semibold mb-2 flex items-center gap-2 text-zinc-100"><span>🔐</span> Permission needed</h3>
-            <p className="text-sm text-zinc-400 mb-3">Agent wants to run <code className="bg-zinc-800 px-1.5 py-0.5 rounded text-zinc-100">{permissionReq.tool}</code>{permissionReq.reason && <> — {permissionReq.reason}</>}</p>
-            {permissionReq.diff ? (
-              <div className="mb-4">
-                <div className="text-xs text-zinc-500 mb-1">Changes preview:</div>
-                <div className="bg-zinc-950 border border-zinc-800 rounded p-2 text-[11px] max-h-64 overflow-auto font-mono whitespace-pre-wrap">
-                  {permissionReq.diff.split('\n').map((line, i) => {
-                    let color = 'text-zinc-300';
-                    if (line.startsWith('+ ')) color = 'text-green-400 bg-green-950/30';
-                    else if (line.startsWith('- ')) color = 'text-red-400 bg-red-950/30';
-                    return <div key={i} className={`${color} px-1`}>{line}</div>;
-                  })}
-                </div>
-              </div>
-            ) : (
-              <pre className="bg-zinc-950 border border-zinc-800 rounded p-2 text-[11px] max-h-48 overflow-auto mb-4 text-zinc-300 whitespace-pre-wrap break-words">{JSON.stringify(permissionReq.args, null, 2).slice(0, 2000)}</pre>
-            )}
-            <div className="flex gap-2 justify-end">
-              <button onClick={() => answerPermission(false)} className="px-4 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-sm">Deny</button>
-              <button onClick={() => answerPermission(true)} className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-sm font-medium">Allow</button>
-            </div>
-          </div>
-        </div>
-      )}
     </main>
   );
 }

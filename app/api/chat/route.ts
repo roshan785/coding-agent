@@ -56,7 +56,7 @@ AVAILABLE TOOLS:
 Instructions:
 - You are in a LOOP. Continue using tools until the task is fully complete and verified.
 - Do not ask for permission in text; if you need to run a tool, just run it.
-- The system will automatically ask the user for permission, auto-verify (tsc), and auto-review (Reviewer Agent) after edits.`;
+- The system will automatically verify (tsc) and auto-review (Reviewer Agent) after edits.`;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -66,7 +66,7 @@ Instructions:
       const convo: ChatMsg[] = [{ role: 'system', content: SYSTEM_PROMPT }, ...recentMessages];
       
       let verifyFailCount = 0;
-      let checkpointMade = false; // NAYA: Tracks if we've saved the state this turn
+      let checkpointMade = false;
 
       try {
         for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -115,6 +115,7 @@ Instructions:
             let args: any = {}; try { args = JSON.parse(tc.function.arguments || '{}'); } catch {}
             const check = needsApproval(tc.function.name, args);
 
+            // Hard block dangerous commands immediately
             if (check.blocked) {
               send({ type: 'tool_start', name: tc.function.name, args });
               const msg = 'Blocked: dangerous command.';
@@ -133,17 +134,15 @@ Instructions:
             const previewDiff = await getPreviewDiff(tc.function.name, args);
             const isWrite = tc.function.name === 'write_file' || tc.function.name === 'edit_file';
 
-            // NAYA: AUTO-CHECKPOINT BEFORE FIRST WRITE
             if (isWrite && !checkpointMade) {
               try {
                 await execAsync('git add -A && git commit -m "Agent Checkpoint (auto)" --allow-empty', { cwd: WORKSPACE });
                 checkpointMade = true;
-              } catch (e) {
-                console.error("Checkpoint failed:", e);
-              }
+              } catch (e) { console.error("Checkpoint failed:", e); }
             }
 
-            const needsPrompt = check.need && !(autoApprove && isWrite);
+            // NAYA LOGIC: If autoApprove is true, NEVER ask for permission (bypass everything except hard blocks)
+            const needsPrompt = check.need && !autoApprove;
 
             if (needsPrompt) {
               const reqId = randomUUID();
