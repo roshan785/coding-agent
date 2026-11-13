@@ -109,6 +109,14 @@ export type ChatStreamEvent =
   | { type: 'tool_result'; name: string; args: ToolArgs; result: string }
   | { type: 'verify'; ok: boolean; command: string; output: string }
   | { type: 'review_result'; ok: boolean; feedback: string }
+  | {
+      type: 'self_heal';
+      attempt: number;
+      maxAttempts: number;
+      strategy: string;
+      message: string;
+    }
+  | { type: 'restart_needed'; message: string }
   | { type: 'done' };
 
 // ─── File tree ───
