@@ -1,11 +1,12 @@
 import { NextRequest } from 'next/server';
 import { randomUUID } from 'crypto';
-import { toolSchemas, executeTool, needsApproval } from '@/lib/tools';
+import { toolSchemas, executeTool, needsApproval, runVerify } from '@/lib/tools';
 import { waitForApproval } from '@/lib/permissions';
 
 const API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const MODEL = 'deepseek-chat';
-const MAX_TURNS = 20;
+const MAX_TURNS = 30;
+const MAX_VERIFY_FAILS = 3;
 
 type ChatMsg = {
   role: 'system' | 'user' | 'assistant' | 'tool';
@@ -27,10 +28,12 @@ STRICT RULES:
 1. ALWAYS read_file before editing.
 2. For edits use edit_file with UNIQUE old_string copied from the file.
 3. write_file only for NEW files.
-4. After editing .ts/.tsx/.js/.jsx files, run: npx tsc --noEmit
-   - If it fails, fix and re-run. Max 3 attempts.
+4. AUTO-VERIFY: after every write_file or edit_file, the system automatically runs the project's verification (e.g. npx tsc --noEmit).
+   - If it FAILS, you will receive the exact error in a user message. Fix it with edit_file.
+   - You have max 3 fix attempts. After 3, stop and report the exact error.
+   - Do NOT declare "done" for code changes until verify passes.
 5. Never fabricate file contents or command output. Use tools.
-6. Be concise. Report what you did.
+6. Be concise. Report what you did and whether verify passed.
 7. Ambiguous task → ask one short clarifying question.
 8. User will be asked to approve writes and risky commands. If denied, stop and ask how to proceed.`;
 
@@ -57,6 +60,8 @@ export async function POST(req: NextRequest) {
         { role: 'system', content: SYSTEM_PROMPT },
         ...messages,
       ];
+
+      let verifyFailCount = 0;
 
       try {
         for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -138,27 +143,21 @@ export async function POST(req: NextRequest) {
 
             if (check.blocked) {
               send({ type: 'tool_start', name: tc.function.name, args });
-              const blockedMsg = 'Blocked: dangerous command. Refusing to run.';
-              send({ type: 'tool_result', name: tc.function.name, args, result: blockedMsg });
-              convo.push({ role: 'tool', tool_call_id: tc.id, content: blockedMsg });
+              const msg = 'Blocked: dangerous command. Refusing to run.';
+              send({ type: 'tool_result', name: tc.function.name, args, result: msg });
+              convo.push({ role: 'tool', tool_call_id: tc.id, content: msg });
               continue;
             }
 
             if (check.need) {
               const reqId = randomUUID();
-              send({
-                type: 'permission_request',
-                id: reqId,
-                tool: tc.function.name,
-                args,
-                reason: check.reason,
-              });
+              send({ type: 'permission_request', id: reqId, tool: tc.function.name, args, reason: check.reason });
               send({ type: 'tool_start', name: tc.function.name, args });
               const approved = await waitForApproval(reqId);
               if (!approved) {
-                const deniedMsg = 'Permission denied by user. Do not retry this exact action; ask the user how to proceed.';
-                send({ type: 'tool_result', name: tc.function.name, args, result: deniedMsg });
-                convo.push({ role: 'tool', tool_call_id: tc.id, content: deniedMsg });
+                const msg = 'Permission denied by user. Do not retry this exact action; ask the user how to proceed.';
+                send({ type: 'tool_result', name: tc.function.name, args, result: msg });
+                convo.push({ role: 'tool', tool_call_id: tc.id, content: msg });
                 continue;
               }
             } else {
@@ -168,14 +167,37 @@ export async function POST(req: NextRequest) {
             const result = await executeTool(tc.function.name, args);
             send({ type: 'tool_result', name: tc.function.name, args, result: result.result });
             convo.push({ role: 'tool', tool_call_id: tc.id, content: result.result });
+
+            // ---- SELF-HEAL: auto-verify after successful writes ----
+            const isWrite = tc.function.name === 'write_file' || tc.function.name === 'edit_file';
+            const succeeded = !result.result.startsWith('Error') && !result.result.startsWith('Blocked');
+            if (isWrite && succeeded) {
+              const v = await runVerify();
+              send({ type: 'verify', ok: v.ok, command: v.command, output: v.output });
+
+              if (v.ok) {
+                verifyFailCount = 0;
+              } else {
+                verifyFailCount++;
+                if (verifyFailCount > MAX_VERIFY_FAILS) {
+                  convo.push({
+                    role: 'user',
+                    content: `Auto-verify has now FAILED ${verifyFailCount} times. STOP trying to fix it. Report the exact errors below to the user and ask how to proceed.\n\n${v.output}`,
+                  });
+                } else {
+                  convo.push({
+                    role: 'user',
+                    content: `Auto-verify FAILED (attempt ${verifyFailCount}/${MAX_VERIFY_FAILS}) running \`${v.command}\`:\n\n${v.output}\n\nFix these errors with edit_file. The system will auto-verify again after your fix.`,
+                  });
+                }
+              }
+            }
           }
         }
       } catch (e: any) {
         send({ type: 'error', message: e.message });
       } finally {
-        try {
-          controller.close();
-        } catch {}
+        try { controller.close(); } catch {}
       }
     },
   });
