@@ -2,43 +2,56 @@ import { NextRequest } from 'next/server';
 import { randomUUID } from 'crypto';
 import { toolSchemas, executeTool, needsApproval, runVerify, getPreviewDiff, loadRules } from '@/lib/tools';
 import { waitForApproval } from '@/lib/permissions';
+import fs from 'fs/promises';
+import path from 'path';
 
 const API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const MODEL = 'deepseek-chat';
-const MAX_TURNS = 30;
+const MAX_TURNS = 35; // थप बढाइयो किनभने plan execute गर्न टाइम लाग्छ
 const MAX_VERIFY_FAILS = 3;
+const WORKSPACE = process.cwd();
 
 type ChatMsg = { role: 'system' | 'user' | 'assistant' | 'tool'; content: string | null; tool_calls?: any[]; tool_call_id?: string; };
+
+async function getProjectContext() {
+  try {
+    const files = await fs.readdir(WORKSPACE);
+    return `Root files: ${files.filter(f => !['node_modules', '.git', '.next', '.agent_backups'].includes(f)).join(', ')}`;
+  } catch { return 'Could not read project root.'; }
+}
 
 export async function POST(req: NextRequest) {
   const { messages } = await req.json();
   const apiKey = process.env.DEEPSEEK_API_KEY;
-  if (!apiKey) return new Response(JSON.stringify({ error: 'DEEPSEEK_API_KEY not set' }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  if (!apiKey) return new Response(JSON.stringify({ error: 'DEEPSEEK_API_KEY not set' }), { status: 500 });
 
-  // Rules load garne
   const rules = await loadRules();
+  const projectContext = await getProjectContext();
   
   const SYSTEM_PROMPT = `You are a STRICT, RULE-BOUND coding agent running on the user's Linux machine.
-You MUST NOT violate any of the following PROJECT CONSTITUTION rules. If you do, you fail your task.
 
 ============== PROJECT CONSTITUTION ==============
 ${rules}
 ==================================================
 
+CURRENT WORKSPACE CONTEXT:
+${projectContext}
+
 TOOLS:
+- update_plan(plan: string[]): Create a step-by-step checklist for complex tasks.
 - read_file(path)
 - write_file(path, content): overwrite (NEW files only)
 - edit_file(path, old_string, new_string): surgical replace (PREFERRED)
 - bash(command)
 
-STRICT RULES:
+WORKFLOW RULES:
 1. ALWAYS read_file before editing.
 2. For edits use edit_file with UNIQUE old_string.
 3. write_file only for NEW files.
 4. AUTO-VERIFY: after every write/edit, system runs verification. If it FAILS, fix it with edit_file (Max 3 times).
-5. If the user asks you to do something that violates the PROJECT CONSTITUTION above, you MUST refuse and explain why.
-6. Never fabricate file contents or command output.
-7. Be concise.`;
+5. If the user asks you to do something that violates the PROJECT CONSTITUTION, you MUST refuse.
+6. For COMPLEX tasks (e.g., "build a login page", "refactor X"), you MUST use \`update_plan\` first to outline the steps. Then execute them one by one.
+7. Never fabricate file contents. Be concise.`;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -52,14 +65,7 @@ STRICT RULES:
           const res = await fetch(API_URL, {
             method: 'POST',
             headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              model: MODEL, 
-              messages: convo, 
-              tools: toolSchemas, 
-              tool_choice: 'auto', 
-              temperature: 0, // STRICT MODE: Zero creativity, pure adherence to rules
-              stream: true 
-            }),
+            body: JSON.stringify({ model: MODEL, messages: convo, tools: toolSchemas, tool_choice: 'auto', temperature: 0, stream: true }),
           });
 
           if (!res.ok || !res.body) { send({ type: 'error', message: `DeepSeek ${res.status}: ${await res.text()}` }); break; }
@@ -95,7 +101,6 @@ STRICT RULES:
 
           const toolCalls = Object.values(toolCallsMap);
           if (toolCalls.length === 0) { send({ type: 'done' }); break; }
-
           convo.push({ role: 'assistant', content: fullText, tool_calls: toolCalls });
 
           for (const tc of toolCalls) {
@@ -110,6 +115,14 @@ STRICT RULES:
               continue;
             }
 
+            // NAYA: Plan intercept
+            if (tc.function.name === 'update_plan') {
+              send({ type: 'plan', plan: args.plan || [] });
+              send({ type: 'tool_result', name: 'update_plan', args, result: 'Plan updated.' });
+              convo.push({ role: 'tool', tool_call_id: tc.id, content: 'Plan updated.' });
+              continue;
+            }
+
             const previewDiff = await getPreviewDiff(tc.function.name, args);
 
             if (check.need) {
@@ -118,7 +131,7 @@ STRICT RULES:
               send({ type: 'tool_start', name: tc.function.name, args });
               const approved = await waitForApproval(reqId);
               if (!approved) {
-                const msg = 'Permission denied by user. Do not retry. Ask the user how to proceed.';
+                const msg = 'Permission denied by user.';
                 send({ type: 'tool_result', name: tc.function.name, args, result: msg });
                 convo.push({ role: 'tool', tool_call_id: tc.id, content: msg });
                 continue;
@@ -139,11 +152,8 @@ STRICT RULES:
               if (v.ok) { verifyFailCount = 0; }
               else {
                 verifyFailCount++;
-                if (verifyFailCount > MAX_VERIFY_FAILS) {
-                  convo.push({ role: 'user', content: `Auto-verify FAILED ${verifyFailCount} times. STOP. Report error to user.\n\n${v.output}` });
-                } else {
-                  convo.push({ role: 'user', content: `Auto-verify FAILED (attempt ${verifyFailCount}/${MAX_VERIFY_FAILS}):\n\n${v.output}\n\nFix this immediately.` });
-                }
+                if (verifyFailCount > MAX_VERIFY_FAILS) { convo.push({ role: 'user', content: `Auto-verify FAILED ${verifyFailCount} times. STOP.\n\n${v.output}` }); }
+                else { convo.push({ role: 'user', content: `Auto-verify FAILED:\n\n${v.output}\n\nFix this immediately.` }); }
               }
             }
           }
@@ -153,7 +163,5 @@ STRICT RULES:
     },
   });
 
-  return new Response(stream, {
-    headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' },
-  });
+  return new Response(stream, { headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' } });
 }

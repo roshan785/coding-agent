@@ -6,14 +6,13 @@ import remarkGfm from 'remark-gfm';
 
 type ToolCall = { name: string; args: any; result: string };
 type Verify = { ok: boolean; command: string; output: string };
-type Msg = { role: 'user' | 'assistant'; content: string; toolCalls?: ToolCall[]; verifies?: Verify[]; timestamp: number; };
+type Msg = { role: 'user' | 'assistant'; content: string; toolCalls?: ToolCall[]; verifies?: Verify[]; plan?: string[]; timestamp: number; };
 type PermissionReq = { id: string; tool: string; args: any; reason?: string; diff?: string | null };
 type TreeNode = { name: string; path: string; type: 'file' | 'dir'; children?: TreeNode[] };
 
 const EXAMPLES = [
-  'app/page.tsx मा के-के छ, summary दे',
+  'एउटा नयाँ component components/Button.tsx बनाऊ जसमा props: label (string) र onClick (function) छ।',
   'lib/hello.ts बनाऊ जसमा greet(name): string छ',
-  'package.json मा typescript को version कति छ?',
   'rm -rf / चलाऊ',
 ];
 
@@ -51,22 +50,12 @@ function MarkdownBody({ content }: { content: string }) {
 function TreeItem({ node, onSelect }: { node: TreeNode, onSelect: (path: string) => void }) {
   const [open, setOpen] = useState(node.path === 'app' || node.path === 'lib');
   if (node.type === 'file') {
-    return (
-      <div onClick={() => onSelect(node.path)} className="cursor-pointer text-sm pl-4 py-0.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 rounded">
-        📄 {node.name}
-      </div>
-    );
+    return (<div onClick={() => onSelect(node.path)} className="cursor-pointer text-sm pl-4 py-0.5 text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800 rounded">📄 {node.name}</div>);
   }
   return (
     <div>
-      <div onClick={() => setOpen(!open)} className="cursor-pointer text-sm pl-1 py-0.5 text-zinc-300 font-medium hover:bg-zinc-800 rounded select-none">
-        {open ? '📂' : '📁'} {node.name}
-      </div>
-      {open && node.children && (
-        <div className="pl-3 border-l border-zinc-800 ml-2">
-          {node.children.map(c => <TreeItem key={c.path} node={c} onSelect={onSelect} />)}
-        </div>
-      )}
+      <div onClick={() => setOpen(!open)} className="cursor-pointer text-sm pl-1 py-0.5 text-zinc-300 font-medium hover:bg-zinc-800 rounded select-none">{open ? '📂' : '📁'} {node.name}</div>
+      {open && node.children && (<div className="pl-3 border-l border-zinc-800 ml-2">{node.children.map(c => <TreeItem key={c.path} node={c} onSelect={onSelect} />)}</div>)}
     </div>
   );
 }
@@ -77,8 +66,6 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [permissionReq, setPermissionReq] = useState<PermissionReq | null>(null);
-  
-  // NAYA: File Tree & Preview
   const [tree, setTree] = useState<TreeNode[]>([]);
   const [previewFile, setPreviewFile] = useState<string | null>(null);
   const [previewContent, setPreviewContent] = useState<string>('');
@@ -88,30 +75,12 @@ export default function Home() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
-    fetch('/api/tree').then(r => r.json()).then(d => { if (d.tree) setTree(d.tree); }).catch(() => {});
-  }, []);
-
+  useEffect(() => { fetch('/api/tree').then(r => r.json()).then(d => { if (d.tree) setTree(d.tree); }).catch(() => {}); }, []);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, loading, permissionReq]);
   useEffect(() => { const el = textareaRef.current; if (!el) return; el.style.height = 'auto'; el.style.height = Math.min(el.scrollHeight, 200) + 'px'; }, [input]);
 
   async function openFile(path: string) {
-    setPreviewFile(path);
-    setLoadingPreview(true);
-    try {
-      const res = await fetch('/api/chat', { // read_file tool bata padhne
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: [{ role: 'user', content: `read_file ${path}` }] })
-      });
-      // Direct read for UI preview
-      const text = await res.text();
-      // Note: For this UI preview, we'll just use a simple trick to read file
-      // In production, we'd have a dedicated /api/file endpoint. 
-      // Let's create that endpoint for clean UI.
-    } catch {}
-    
-    // We will use a direct read API for preview
+    setPreviewFile(path); setLoadingPreview(true);
     const res = await fetch(`/api/file?path=${encodeURIComponent(path)}`);
     const data = await res.json();
     setPreviewContent(data.content || 'Error loading file');
@@ -135,12 +104,12 @@ export default function Home() {
     setInput(''); setLoading(true);
     const ac = new AbortController(); abortRef.current = ac;
 
-    let currentContent = ''; let currentTools: ToolCall[] = []; let currentVerifies: Verify[] = [];
-    const updateAssistant = () => { setMessages((prev) => { const copy = [...prev]; copy[assistantIdx] = { ...copy[assistantIdx], content: currentContent, toolCalls: [...currentTools], verifies: [...currentVerifies] }; return copy; }); };
+    let currentContent = ''; let currentTools: ToolCall[] = []; let currentVerifies: Verify[] = []; let currentPlan: string[] = [];
+    const updateAssistant = () => { setMessages((prev) => { const copy = [...prev]; copy[assistantIdx] = { ...copy[assistantIdx], content: currentContent, toolCalls: [...currentTools], verifies: [...currentVerifies], plan: [...currentPlan] }; return copy; }); };
 
     try {
       const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: next.map(({ role, content }) => ({ role, content })) }), signal: ac.signal });
-      if (!res.ok || !res.body) { let m = `HTTP ${res.status}`; try { const j = await res.json(); if (j.error) m = j.error; } catch {} throw new Error(m); }
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
       const reader = res.body.getReader(); const decoder = new TextDecoder(); let buf = '';
 
@@ -152,6 +121,7 @@ export default function Home() {
           let data: any; try { data = JSON.parse(raw); } catch { continue; }
 
           if (data.type === 'text') { currentContent += data.chunk; updateAssistant(); }
+          else if (data.type === 'plan') { currentPlan = data.plan; updateAssistant(); } // NAYA
           else if (data.type === 'tool_start') { currentTools.push({ name: data.name, args: data.args, result: '' }); updateAssistant(); }
           else if (data.type === 'tool_result') {
             for (let i = currentTools.length - 1; i >= 0; i--) { if (currentTools[i].name === data.name && JSON.stringify(currentTools[i].args) === JSON.stringify(data.args) && !currentTools[i].result) { currentTools[i].result = data.result; break; } }
@@ -176,36 +146,25 @@ export default function Home() {
 
   return (
     <main className="flex h-screen bg-zinc-950 text-zinc-100">
-      {/* ===== LEFT SIDEBAR (File Tree) ===== */}
+      {/* LEFT SIDEBAR */}
       <div className="w-64 border-r border-zinc-800 flex flex-col bg-zinc-950 shrink-0">
-        <div className="px-4 py-3 border-b border-zinc-800 font-semibold text-sm flex items-center gap-2">
-          <span>📁</span> Explorer
-        </div>
-        <div className="flex-1 overflow-y-auto p-2">
-          {tree.map(node => <TreeItem key={node.path} node={node} onSelect={openFile} />)}
-        </div>
+        <div className="px-4 py-3 border-b border-zinc-800 font-semibold text-sm flex items-center gap-2"><span>📁</span> Explorer</div>
+        <div className="flex-1 overflow-y-auto p-2">{tree.map(node => <TreeItem key={node.path} node={node} onSelect={openFile} />)}</div>
       </div>
 
-      {/* ===== MIDDLE (Preview) ===== */}
+      {/* MIDDLE PREVIEW */}
       {previewFile && (
         <div className="w-1/3 border-r border-zinc-800 flex flex-col bg-zinc-950 shrink-0">
-          <div className="px-4 py-3 border-b border-zinc-800 text-sm flex justify-between items-center">
-            <span className="truncate">{previewFile}</span>
-            <button onClick={() => setPreviewFile(null)} className="text-zinc-500 hover:text-zinc-200">✕</button>
-          </div>
-          <div className="flex-1 overflow-auto p-4">
-            {loadingPreview ? <div className="text-zinc-500 text-sm">Loading...</div> : (
-              <pre className="text-xs font-mono text-zinc-300 whitespace-pre-wrap">{previewContent}</pre>
-            )}
-          </div>
+          <div className="px-4 py-3 border-b border-zinc-800 text-sm flex justify-between items-center"><span className="truncate">{previewFile}</span><button onClick={() => setPreviewFile(null)} className="text-zinc-500 hover:text-zinc-200">✕</button></div>
+          <div className="flex-1 overflow-auto p-4">{loadingPreview ? <div className="text-zinc-500 text-sm">Loading...</div> : (<pre className="text-xs font-mono text-zinc-300 whitespace-pre-wrap">{previewContent}</pre>)}</div>
         </div>
       )}
 
-      {/* ===== RIGHT (Chat) ===== */}
+      {/* RIGHT CHAT */}
       <div className="flex-1 flex flex-col min-w-0">
         <header className="border-b border-zinc-800 px-6 py-3 flex items-center gap-3 shrink-0">
           <div className={`w-2 h-2 rounded-full ${loading ? 'bg-amber-400 animate-pulse' : 'bg-green-500'}`} />
-          <h1 className="font-semibold text-sm">Coding Agent · Context-Aware</h1>
+          <h1 className="font-semibold text-sm">Coding Agent · Planner</h1>
           <span className="ml-auto text-xs text-zinc-500">{permissionReq ? 'waiting approval…' : loading ? 'streaming…' : 'idle'}</span>
         </header>
 
@@ -224,12 +183,28 @@ export default function Home() {
               return (
                 <div key={i} className={`group ${m.role === 'user' ? 'flex justify-end' : 'flex justify-start'}`}>
                   <div className={`max-w-[85%] ${m.role === 'user' ? '' : 'w-full'}`}>
+                    
+                    {/* NAYA: PLAN UI */}
+                    {m.plan && m.plan.length > 0 && (
+                      <div className="mb-3 bg-zinc-900 border border-zinc-700 rounded-xl p-3 shadow-inner">
+                        <div className="text-xs font-semibold text-zinc-300 mb-2 flex items-center gap-2">📋 Action Plan</div>
+                        <ul className="space-y-1">
+                          {m.plan.map((step, idx) => (
+                            <li key={idx} className="text-sm text-zinc-400 flex items-start gap-2">
+                              <span className="text-blue-500 mt-0.5">•</span> {step}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
                     {m.toolCalls && m.toolCalls.length > 0 && (
                       <div className="mb-2 space-y-1">{m.toolCalls.map((tc, j) => (<details key={j} className="text-[11px] font-mono bg-zinc-900 border border-zinc-800 rounded-lg overflow-hidden" open={!tc.result ? true : undefined}><summary className="cursor-pointer px-2.5 py-1.5 text-zinc-400 hover:bg-zinc-800/50 select-none"><span className="text-amber-400">{tc.result ? '🔧' : '⏳'}</span>{' '}<span className="text-zinc-200">{tc.name}</span><span className="text-zinc-500">({JSON.stringify(tc.args).slice(0, 80)}{JSON.stringify(tc.args).length > 80 ? '…' : ''})</span></summary><div className="border-t border-zinc-800 px-2.5 py-1.5"><div className="text-zinc-500 mb-1">result:</div><pre className="whitespace-pre-wrap break-words text-zinc-300 max-h-48 overflow-y-auto">{tc.result ? tc.result.slice(0, 2000) + (tc.result.length > 2000 ? '\n…(truncated)' : '') : 'running…'}</pre></div></details>))}</div>
                     )}
                     {m.verifies && m.verifies.length > 0 && (
                       <div className="mb-2 space-y-1">{m.verifies.map((v, j) => (<details key={`v${j}`} className={`text-[11px] font-mono rounded-lg overflow-hidden border ${v.ok ? 'bg-emerald-950/40 border-emerald-800' : 'bg-red-950/40 border-red-800'}`}><summary className="cursor-pointer px-2.5 py-1.5 select-none hover:bg-white/5"><span>{v.ok ? '✅' : '❌'}</span>{' '}<span className={v.ok ? 'text-emerald-300' : 'text-red-300'}>{v.ok ? 'verify passed' : 'verify failed'}</span>{' '}<span className="text-zinc-500">— {v.command}</span></summary><div className="border-t border-white/10 px-2.5 py-1.5"><pre className="whitespace-pre-wrap break-words text-zinc-300 max-h-48 overflow-y-auto">{v.output || '(no output)'}</pre></div></details>))}</div>
                     )}
+
                     {showBubble && (
                       <div className={`rounded-2xl px-4 py-2.5 text-sm ${m.role === 'user' ? 'bg-blue-600 text-white' : 'bg-zinc-900 border border-zinc-800 text-zinc-100'}`}>
                         {m.role === 'user' ? (<div className="whitespace-pre-wrap">{m.content}</div>) : (<><MarkdownBody content={m.content} />{isStreamingThis && (<span className="inline-block w-2 h-4 bg-zinc-300 animate-pulse ml-0.5 align-middle" />)}</>)}
@@ -250,16 +225,16 @@ export default function Home() {
         <div className="border-t border-zinc-800 p-3 sm:p-4 shrink-0">
           <div className="max-w-3xl mx-auto">
             <div className="flex gap-2 items-end">
-              <textarea ref={textareaRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onKeyDown} placeholder="Message the agent…" rows={1} className="flex-1 bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none focus:border-blue-500 min-h-[44px] max-h-[200px]" />
+              <textarea ref={textareaRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={onKeyDown} placeholder="Message the agent… (Enter to send, Shift+Enter for newline)" rows={1} className="flex-1 bg-zinc-900 border border-zinc-700 rounded-xl px-3 py-2.5 text-sm resize-none focus:outline-none focus:border-blue-500 min-h-[44px] max-h-[200px]" />
               {loading ? (<button onClick={stop} className="bg-red-600 hover:bg-red-500 px-5 h-[44px] rounded-xl text-sm font-medium">Stop</button>)
                 : (<button onClick={() => send()} disabled={!input.trim()} className="bg-blue-600 hover:bg-blue-500 disabled:bg-zinc-700 disabled:cursor-not-allowed px-5 h-[44px] rounded-xl text-sm font-medium">Send</button>)}
             </div>
-            <div className="text-[10px] text-zinc-600 mt-1.5 text-center">🛡️ Strict Rule Engine · 🔐 Diff Preview · 📁 Workspace Context Active</div>
+            <div className="text-[10px] text-zinc-600 mt-1.5 text-center">📋 Planner Active · 🔐 Diff Preview · 🛡️ Strict Rules</div>
           </div>
         </div>
       </div>
 
-      {/* Modal */}
+      {/* PERMISSION MODAL */}
       {permissionReq && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4">
           <div className="bg-zinc-900 border border-zinc-700 rounded-xl max-w-2xl w-full p-5 shadow-2xl">
