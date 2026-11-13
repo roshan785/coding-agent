@@ -3,9 +3,12 @@ import { randomUUID } from 'crypto';
 import { toolSchemas, executeTool, needsApproval, runVerify, getPreviewDiff, loadRules, loadMemory } from '@/lib/tools';
 import { waitForApproval } from '@/lib/permissions';
 import { reviewCode } from '@/lib/reviewer';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
 
+const execAsync = promisify(exec);
 const API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const MODEL = 'deepseek-chat';
 const MAX_TURNS = 40;
@@ -63,6 +66,7 @@ Instructions:
       const convo: ChatMsg[] = [{ role: 'system', content: SYSTEM_PROMPT }, ...recentMessages];
       
       let verifyFailCount = 0;
+      let checkpointMade = false; // NAYA: Tracks if we've saved the state this turn
 
       try {
         for (let turn = 0; turn < MAX_TURNS; turn++) {
@@ -128,6 +132,17 @@ Instructions:
 
             const previewDiff = await getPreviewDiff(tc.function.name, args);
             const isWrite = tc.function.name === 'write_file' || tc.function.name === 'edit_file';
+
+            // NAYA: AUTO-CHECKPOINT BEFORE FIRST WRITE
+            if (isWrite && !checkpointMade) {
+              try {
+                await execAsync('git add -A && git commit -m "Agent Checkpoint (auto)" --allow-empty', { cwd: WORKSPACE });
+                checkpointMade = true;
+              } catch (e) {
+                console.error("Checkpoint failed:", e);
+              }
+            }
+
             const needsPrompt = check.need && !(autoApprove && isWrite);
 
             if (needsPrompt) {
@@ -152,7 +167,6 @@ Instructions:
             const succeeded = !result.result.startsWith('Error') && !result.result.startsWith('Blocked');
             
             if (isWrite && succeeded) {
-              // 1. TSC VERIFY
               const v = await runVerify();
               send({ type: 'verify', ok: v.ok, command: v.command, output: v.output });
               
@@ -162,7 +176,6 @@ Instructions:
                 else { convo.push({ role: 'user', content: `Auto-verify FAILED:\n\n${v.output}\n\nFix this immediately.` }); }
               } else {
                 verifyFailCount = 0;
-                // 2. NAYA: REVIEWER AGENT (With safe path check)
                 if (typeof tc.args.path === 'string') {
                   send({ type: 'review_start', file: tc.args.path });
                   try {
@@ -170,7 +183,6 @@ Instructions:
                     const contentToReview = await fs.readFile(fullPath, 'utf-8');
                     const review = await reviewCode(tc.args.path, contentToReview);
                     send({ type: 'review_result', ok: review.ok, feedback: review.feedback });
-                    
                     if (!review.ok) {
                       convo.push({ role: 'user', content: `Reviewer Agent REJECTED your code for ${tc.args.path}:\n\n${review.feedback}\n\nFix the code according to this review.` });
                     }

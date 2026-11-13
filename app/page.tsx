@@ -94,6 +94,27 @@ export default function Home() {
     try { await fetch('/api/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: req.id, approved }) }); } catch {}
   }
 
+  // NAYA: Undo Function
+  async function undoLastChange() {
+    if (!confirm("के तपाईं पक्का हुनुहुन्छ? Agent ले गरेको पछिल्लो परिवर्तन उल्टाइनेछ (Undo)।")) return;
+    try {
+      const res = await fetch('/api/git', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'undo' })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        alert("Undo सफल भयो!");
+        window.location.reload(); // Refresh to clear chat and reload tree
+      } else {
+        alert("Undo failed: " + data.error);
+      }
+    } catch (e) {
+      alert("Error during Undo");
+    }
+  }
+
   async function send(text?: string) {
     const content = (text ?? input).trim();
     if (!content || loading) return;
@@ -169,9 +190,13 @@ export default function Home() {
       <div className="flex-1 flex flex-col min-w-0">
         <header className="border-b border-zinc-800 px-6 py-3 flex items-center gap-3 shrink-0">
           <div className={`w-2 h-2 rounded-full ${loading ? 'bg-amber-400 animate-pulse' : 'bg-green-500'}`} />
-          <h1 className="font-semibold text-sm">Coding Agent · Multi-Agent</h1>
+          <h1 className="font-semibold text-sm">Coding Agent · Auto-Checkpoint</h1>
           
-          <label className="ml-auto flex items-center gap-2 cursor-pointer text-xs text-zinc-400 hover:text-zinc-200 transition">
+          <button onClick={undoLastChange} disabled={loading} className="ml-auto text-xs bg-zinc-800 hover:bg-zinc-700 px-3 py-1 rounded-md transition disabled:opacity-50 text-red-400 font-medium">
+            ↩️ Undo
+          </button>
+
+          <label className="flex items-center gap-2 cursor-pointer text-xs text-zinc-400 hover:text-zinc-200 transition">
             <input type="checkbox" checked={autoApprove} onChange={(e) => setAutoApprove(e.target.checked)} className="accent-blue-500" />
             ⚡ Auto-Approve
           </label>
